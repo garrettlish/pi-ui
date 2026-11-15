@@ -839,6 +839,43 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   animation: s-dot-pulse 1.4s ease-in-out infinite;
 }
 #status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* A dead or unreachable server. This is the one failure the page cannot recover
+   from by itself — every command goes through that process — so it is a banner
+   in the composer dock rather than a line in the sidebar corner: it has to say
+   what happened, that the transcript on screen is still readable, and that a
+   retry exists. Tinted rather than filled: the text is what matters, and a
+   solid red block above the input competes with the conversation. */
+.conn-banner {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 16px 0; padding: 7px 12px;
+  font-size: 12px; line-height: 1.45;
+  border-radius: var(--radius-sm);
+  color: var(--text); background: var(--danger-tint);
+  border: 1px solid var(--danger);
+}
+.conn-banner .conn-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--danger);
+  animation: s-dot-pulse 1.4s ease-in-out infinite;
+}
+.conn-banner .conn-copy {
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 0; overflow: hidden;
+}
+.conn-banner strong { font-weight: 600; }
+.conn-banner #conn-detail {
+  color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conn-banner #conn-retry { flex: none; }
+/* Once reconnecting is under way the banner stays put (the state is still bad)
+   but stops pulsing, so the animation is not a false "working on it" signal. */
+.conn-banner.retrying .conn-dot { animation: none; opacity: 0.6; }
+/* The composer stays readable — a draft must not look lost — but it stops
+   looking acceptive: no focus ring inviting a send that cannot happen. */
+#input.conn-blocked { opacity: 0.65; }
+#input.conn-blocked::placeholder { color: var(--danger); opacity: 0.9; }
 /* Stop belongs on the running line, so it never competes with Send. It keeps a
    surface of its own: red text on the status fill would drop under 4.5:1. */
 #btn-abort {

@@ -18,7 +18,7 @@
  * CSRF). Binding elsewhere, or --allow-remote, turns those guards off.
  */
 import http from "node:http";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { readFileSync, createReadStream } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -172,18 +172,23 @@ function sweepClients(now = Date.now(), target = CLIENTS_MAX) {
 function wireProcessTracking() {
   sessionHost.onBashStart = (session, toolCallId) => {
     if (!toolCallId || session.callSnapshots.has(toolCallId)) return;
-    session.callSnapshots.set(toolCallId, processSnapshot());
+    const pending = processSnapshot();
+    session.callSnapshots.set(toolCallId, pending);
+    // A call that ends before the snapshot resolves still has to diff against
+    // *something*, so keep the promise and let onBashEnd await it.
+    pending.catch(() => {});
   };
 
-  sessionHost.onBashEnd = (session, toolCallId) => {
-    const before = session.callSnapshots.get(toolCallId);
-    if (!before) return;
+  sessionHost.onBashEnd = async (session, toolCallId) => {
+    const pending = session.callSnapshots.get(toolCallId);
+    if (!pending) return;
     session.callSnapshots.delete(toolCallId);
-    const after = processSnapshot();
+    const before = await pending;
+    const after = await processSnapshot();
     const survivors = leftoversOf(after, newPidsSince(before, after), [process.pid]);
     pruneLeftovers(session, after);
     if (!survivors.length) return;
-    const { cwdByPid, portsByPid } = describeProcesses(survivors);
+    const { cwdByPid, portsByPid } = await describeProcesses(survivors);
     for (const entry of survivors) {
       const described = describeProcess(entry, cwdByPid, portsByPid);
       session.leftovers.set(described.pid, { ...described, since: Date.now(), toolCallId });
@@ -196,15 +201,45 @@ function wireProcessTracking() {
   };
 }
 
-/** Forget leftovers that are no longer running. */
-function pruneLeftovers(session, table = processSnapshot()) {
-  for (const pid of [...session.leftovers.keys()]) if (!table.has(pid)) session.leftovers.delete(pid);
+/** Forget leftovers that are no longer running.
+ *
+ *  With a process table (the end of a bash call) it is a lookup in that table,
+ *  which is fresher than a signal and costs nothing. Without one — the periodic
+ *  sweep, a panel read — a signal-0 per recorded pid is enough: the list is
+ *  short (processes a session deliberately backgrounded), and this is the only
+ *  cheap way to notice an exit that the server did not cause. */
+function pruneLeftovers(session, table = null) {
+  for (const pid of [...session.leftovers.keys()]) {
+    const alive = table ? table.has(pid) : isPidAlive(pid);
+    if (!alive) session.leftovers.delete(pid);
+  }
 }
 
 /** Current leftovers, oldest first, with a fresh liveness filter. */
 function backgroundProcesses(session) {
   pruneLeftovers(session);
   return [...session.leftovers.values()].sort((a, b) => a.since - b.since);
+}
+
+/** Drop leftovers that exited on their own and tell the tabs.
+ *
+ *  Without this a row outlives its process: `backgroundProcesses` prunes, but it
+ *  only ran on a bash call, a stop, or a `/api/processes` read — so a server the
+ *  user killed from a terminal stayed in the dock (and kept its badge) until the
+ *  resources panel was opened and re-read the list. The tabs mirror a pushed
+ *  list, so the sweep has to push, not just prune. */
+function sweepLeftovers() {
+  for (const session of sessionHost?.sessions.values() || []) {
+    if (!session.leftovers.size) continue;
+    const before = session.leftovers.size;
+    pruneLeftovers(session);
+    if (session.leftovers.size === before) continue;
+    session.broadcast({
+      type: "server",
+      event: "background_processes",
+      processes: [...session.leftovers.values()].sort((a, b) => a.since - b.since),
+    });
+  }
 }
 
 /** Replay the leftover list on (re)attach. Always sent, even when empty: an
@@ -259,6 +294,10 @@ async function openSession({ client, sessionFile, cwd }) {
 // Dispose sessions nobody is watching. A running session is left alone: the tab
 // may have closed while a long run continues, and re-attaching is the point.
 setInterval(() => sessionHost?.reapIdle(), 60000).unref();
+// A background process can exit on its own; without this the row would sit in
+// the dock until something re-read the list. Cheap: one signal-0 per recorded
+// pid, and it only broadcasts when the list actually shrank.
+setInterval(sweepLeftovers, 5000).unref();
 
 // ---------------------------------------------------------------------------
 // Configured models: filter the catalog down to settings.enabledModels patterns
@@ -320,20 +359,31 @@ function filterConfiguredModels(models, patterns) {
 //  - Detection needs a call window; a server started before this version of
 //    pi-web was running is not retroactively attributed to a session.
 
-/** One snapshot of every process this user owns, keyed by pid. */
+/** One snapshot of every process this user owns, keyed by pid.
+ *
+ *  Asynchronous on purpose: `ps` costs ~17 ms and a synchronous exec blocks the
+ *  event loop for that whole time — which stalls every SSE write and every HTTP
+ *  request in the process, not just the process table. It runs twice per bash
+ *  call (before and after), so on a parallel-subagent run those blocks used to
+ *  land back to back. */
 function processSnapshot() {
-  let out;
-  try {
-    out = execFileSync("ps", ["-axww", "-o", "pid=,uid=,ppid=,pgid=,lstart=,command="], {
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 5000,
-      // A C locale keeps lstart's month names stable for the comparison below.
-      env: { ...process.env, LC_ALL: "C" },
-    });
-  } catch {
-    return new Map();
-  }
+  return new Promise((resolve) => {
+    execFile(
+      "ps",
+      ["-axww", "-o", "pid=,uid=,ppid=,pgid=,lstart=,command="],
+      {
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: 5000,
+        // A C locale keeps lstart's month names stable for the comparison below.
+        env: { ...process.env, LC_ALL: "C" },
+      },
+      (err, out) => resolve(err ? new Map() : parseProcessTable(out))
+    );
+  });
+}
+
+function parseProcessTable(out) {
   // Only this user's processes: a tool call cannot have started anyone else's.
   const uid = String(process.getuid ? process.getuid() : "");
   const rows = new Map();
@@ -346,6 +396,21 @@ function processSnapshot() {
     rows.set(Number(m[1]), { pid: Number(m[1]), ppid: Number(m[3]), pgid: Number(m[4]), started: m[5], args: m[6] });
   }
   return rows;
+}
+
+/** Cheap liveness probe — no subprocess, one syscall. `ps` is only needed when
+ *  a *new* process has to be identified (the before/after diff of a bash call);
+ *  deciding whether a known pid is still running is a signal-0.
+ *
+ *  EPERM means it exists and belongs to someone else, which for a pid we
+ *  started ourselves cannot happen — treating it as alive is the safe read. */
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
 }
 
 /** Pids that appeared — or changed identity — between two snapshots. The start
@@ -435,28 +500,34 @@ function describeProcess(entry, cwdByPid, portsByPid) {
 /** Working directory and listening port for a handful of pids, in two batched
  *  `lsof` calls. Both are only ever asked for the few survivors of one call, and
  *  a missing lsof (or a process that exits mid-call) degrades to empty fields
- *  rather than failing the report. */
-function describeProcesses(entries) {
+ *  rather than failing the report. Asynchronous for the same reason `ps` is:
+ *  lsof on a busy machine blocks the event loop for tens of milliseconds, and
+ *  that lands in the middle of every other tab's SSE stream. */
+async function describeProcesses(entries) {
   const cwdByPid = new Map();
   const portsByPid = new Map();
   if (!entries.length) return { cwdByPid, portsByPid };
   const pidList = entries.map((e) => e.pid).join(",");
-  const run = (args) => {
-    try {
-      return execFileSync("lsof", args, { encoding: "utf8", timeout: 5000, maxBuffer: 4 * 1024 * 1024 });
-    } catch {
-      return ""; // lsof exits 1 when nothing matches, which is the normal case
-    }
-  };
+  const run = (args) =>
+    new Promise((resolve) => {
+      execFile("lsof", args, { encoding: "utf8", timeout: 5000, maxBuffer: 4 * 1024 * 1024 }, (err, out) =>
+        // lsof exits 1 when nothing matches, which is the normal case
+        resolve(err ? "" : out)
+      );
+    });
+  const [cwdOut, portOut] = await Promise.all([
+    run(["-a", "-p", pidList, "-d", "cwd", "-Fn", "-Fp"]),
+    // -P keeps the port numeric: the name a service is registered under is not
+    // what the reader needs to find and stop it again.
+    run(["-a", "-p", pidList, "-nP", "-iTCP", "-sTCP:LISTEN", "-Fn", "-Fp"]),
+  ]);
   let pid = 0;
-  for (const line of run(["-a", "-p", pidList, "-d", "cwd", "-Fn", "-Fp"]).split("\n")) {
+  for (const line of cwdOut.split("\n")) {
     if (line.startsWith("p")) pid = Number(line.slice(1));
     else if (line.startsWith("n") && pid) cwdByPid.set(pid, line.slice(1));
   }
   pid = 0;
-  // -P keeps the port numeric: the name a service is registered under is not
-  // what the reader needs to find and stop it again.
-  for (const line of run(["-a", "-p", pidList, "-nP", "-iTCP", "-sTCP:LISTEN", "-Fn", "-Fp"]).split("\n")) {
+  for (const line of portOut.split("\n")) {
     if (line.startsWith("p")) pid = Number(line.slice(1));
     else if (line.startsWith("n") && pid) {
       const port = Number(line.slice(1).replace(/.*:/, ""));
@@ -606,69 +677,115 @@ async function sessionFilesWithStats(limit = 400) {
   return stats.filter(Boolean).sort((a, b) => b.st.mtimeMs - a.st.mtimeMs).slice(0, limit);
 }
 
-/** One-line summary of a session file for its sidebar row.
+/** The counters one session file's summary is made of. Kept as a mutable
+ *  accumulator so a file that only grew can be topped up from its new bytes
+ *  instead of being parsed from the beginning. */
+function emptySummaryAcc() {
+  return { header: null, name: null, title: null, messages: 0, cost: 0, lastTs: null };
+}
+
+/** Fold one JSONL line into a summary accumulator.
+ *
  *  Assistant-message cost and `usage` entries are summed together on purpose:
  *  pi documents a `usage` entry as model-attributed usage that is *not* part of
  *  an assistant message (e.g. cache warming), so both contribute to the total
  *  without overlapping. */
-function summarizeSessionText(text, st, f) {
-  let header = null;
-  let name = null;
-  let title = null;
-  let messages = 0;
-  let cost = 0;
-  let lastTs = null;
-  for (const line of text.split("\n")) {
-    if (!line) continue;
-    let e;
-    try {
-      e = JSON.parse(line);
-    } catch {
-      continue; // a partially written trailing line is normal for a live session
-    }
-    if (e.type === "session") header = e;
-    else if (e.type === "session_info" && e.name) name = e.name;
-    else if (e.type === "message") {
-      messages++;
-      lastTs = e.timestamp;
-      if (title === null && e.message?.role === "user") title = promptText(e.message.content);
-      if (e.message?.role === "assistant" && e.message?.usage?.cost) cost += e.message.usage.cost.total || 0;
-    } else if (e.type === "usage" && e.usage?.cost) {
-      cost += e.usage.cost.total || 0;
-    }
+function applySummaryLine(acc, line) {
+  if (!line) return;
+  let e;
+  try {
+    e = JSON.parse(line);
+  } catch {
+    return; // a partially written trailing line is normal for a live session
   }
-  if (!header) return null;
+  if (e.type === "session") acc.header = e;
+  else if (e.type === "session_info" && e.name) acc.name = e.name;
+  else if (e.type === "message") {
+    acc.messages++;
+    acc.lastTs = e.timestamp;
+    if (acc.title === null && e.message?.role === "user") acc.title = promptText(e.message.content);
+    if (e.message?.role === "assistant" && e.message?.usage?.cost) acc.cost += e.message.usage.cost.total || 0;
+  } else if (e.type === "usage" && e.usage?.cost) {
+    acc.cost += e.usage.cost.total || 0;
+  }
+}
+
+function summaryOf(acc, st, f) {
+  if (!acc.header) return null;
   return {
     file: f,
-    id: header.id,
-    cwd: header.cwd,
-    timestamp: header.timestamp,
-    lastTimestamp: lastTs,
-    name: name || null,
-    title: (title || "").slice(0, 120),
-    messages,
-    cost: Number(cost.toFixed(4)),
+    id: acc.header.id,
+    cwd: acc.header.cwd,
+    timestamp: acc.header.timestamp,
+    lastTimestamp: acc.lastTs,
+    name: acc.name || null,
+    title: (acc.title || "").slice(0, 120),
+    messages: acc.messages,
+    cost: Number(acc.cost.toFixed(4)),
     mtime: st.mtimeMs,
   };
 }
 
-/** Per-file summaries, keyed by path and validated by mtime+size. Session files
- *  are append-mostly, so the sidebar only re-parses the files that changed
- *  instead of re-reading the whole (often hundreds of megabytes) corpus on
- *  every poll. */
+/** Read `[start, end)` and return only the complete lines in it.
+ *
+ *  The tail after the last newline is dropped rather than parsed: it is a line
+ *  still being written, and consuming it would either lose it or double-count
+ *  it on the next poll. Byte-level rather than string-level so a range that ends
+ *  inside a multi-byte character cannot corrupt the offset. */
+async function readCompleteLines(f, start, end) {
+  const length = end - start;
+  if (length <= 0) return { lines: [], consumed: 0 };
+  const buf = Buffer.allocUnsafe(length);
+  const fh = await fsp.open(f, "r");
+  let read = 0;
+  try {
+    while (read < length) {
+      const { bytesRead } = await fh.read(buf, read, length - read, start + read);
+      if (bytesRead <= 0) break;
+      read += bytesRead;
+    }
+  } finally {
+    await fh.close();
+  }
+  const view = buf.subarray(0, read);
+  const nl = view.lastIndexOf(0x0a);
+  if (nl < 0) return { lines: [], consumed: 0 };
+  const text = view.subarray(0, nl + 1).toString("utf8");
+  return { lines: text.split("\n"), consumed: nl + 1 };
+}
+
+/** Per-file summaries. Session files are append-mostly, so a file that changed
+ *  is topped up from the bytes appended since the last read instead of being
+ *  re-parsed whole. That matters because the sidebar polls: a session a run is
+ *  actively writing to changes on every poll, and re-reading a 30 MB transcript
+ *  to recount its messages is what turned a 8 s poll into a visible stall. */
 const sessionSummaryCache = new Map();
 
 async function sessionSummary(f, st) {
-  const key = `${st.mtimeMs}:${st.size}`;
   const cached = sessionSummaryCache.get(f);
-  if (cached && cached.key === key) return cached.summary;
-  let summary = null;
+  // A touch without a write changes neither the counters nor the offset.
+  if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) return cached.summary;
+
+  // Grow-only is the append case; anything else (a truncation, a rewrite) has
+  // to be re-read from byte 0 or the counters would describe a file that no
+  // longer exists.
+  const canAppend = cached && cached.acc.header && st.size >= cached.size;
+  const acc = canAppend ? { ...cached.acc } : emptySummaryAcc();
+  let offset = canAppend ? cached.offset : 0;
+
   try {
-    summary = summarizeSessionText(await fsp.readFile(f, "utf8"), st, f);
+    const { lines, consumed } = await readCompleteLines(f, offset, st.size);
+    for (const line of lines) applySummaryLine(acc, line);
+    offset += consumed;
   } catch {
-    summary = null;
+    // An unreadable or truncated file under a live writer: report what we have
+    // rather than dropping the row out of the sidebar entirely.
+    if (!canAppend) sessionSummaryCache.delete(f);
+    return canAppend ? cached.summary : null;
   }
-  sessionSummaryCache.set(f, { key, summary });
+
+  const summary = summaryOf(acc, st, f);
+  sessionSummaryCache.set(f, { size: st.size, mtimeMs: st.mtimeMs, offset, acc, summary });
   return summary;
 }
 
@@ -1654,6 +1771,34 @@ const MIME = {
   ".png": "image/png",
 };
 
+/** Text types worth gzipping on the wire. `favicon.svg` is left out on purpose:
+ *  it is 367 bytes and already handled in one packet. */
+const COMPRESSIBLE = new Set([".html", ".js", ".css"]);
+
+function acceptsGzip(req) {
+  const ae = req.headers["accept-encoding"];
+  return typeof ae === "string" && /\bgzip\b/.test(ae);
+}
+
+/** Gzipped bytes of one static file, memoised by its ETag.
+ *
+ *  "no-cache" means the browser revalidates on every load, and revalidating
+ *  ends in a 304 — so the compressed body is only ever built for a fresh copy.
+ *  The cache is there for the case a page is opened repeatedly (several tabs,
+ *  a hard reload): compressing is asynchronous, because a synchronous gzip of
+ *  259 KB would stall every SSE stream for the same few milliseconds. */
+const gzipCache = new Map(); // file -> { etag, bytes }
+
+async function gzipCached(file, etag, data) {
+  const hit = gzipCache.get(file);
+  if (hit && hit.etag === etag) return hit.bytes;
+  const bytes = await new Promise((resolve, reject) =>
+    zlib.gzip(data, (err, out) => (err ? reject(err) : resolve(out)))
+  );
+  gzipCache.set(file, { etag, bytes });
+  return bytes;
+}
+
 /** Image types the read tool may return, and the sniffed magic bytes that must
  *  match. Only these are served: an arbitrary file must never be readable
  *  through the image endpoint just because a tool call named it. */
@@ -2165,6 +2310,7 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const st = await fsp.stat(file);
+      const type = MIME[path.extname(file)] || "application/octet-stream";
       // Strong-ish validator from metadata, not content: hashing app.js on
       // every request would cost as much as sending it.
       const etag = `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
@@ -2174,15 +2320,23 @@ const server = http.createServer(async (req, res) => {
         res.end();
         return;
       }
-      const data = await fsp.readFile(file);
-      res.writeHead(200, {
-        "Content-Type": MIME[path.extname(file)] || "application/octet-stream",
+      let data = await fsp.readFile(file);
+      const headers = {
         // dev tool: always revalidate so client code changes apply on reload.
         // The ETag turns that revalidation into a bodyless 304 when the file
         // has not changed.
         "Cache-Control": "no-cache",
         ETag: etag,
-      });
+      };
+      // app.js is 259 KB and style.css 91 KB of source the browser parses on
+      // every cold load. They compress to 75 KB and 19 KB, and the ETag still
+      // makes a reload a 304 — this only pays for the first byte.
+      if (acceptsGzip(req) && COMPRESSIBLE.has(path.extname(file)) && data.length > 1024) {
+        data = await gzipCached(file, etag, data);
+        headers["Content-Encoding"] = "gzip";
+        headers.Vary = "Accept-Encoding";
+      }
+      res.writeHead(200, { ...headers, "Content-Type": type, "Content-Length": data.length });
       res.end(data);
     } catch {
       res.writeHead(404);
@@ -2220,7 +2374,7 @@ async function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-server.on("error", (err) => {
+server.on("error", (/** @type {NodeJS.ErrnoException} */ err) => {
   if (err.code === "EADDRINUSE") {
     console.error(`[pi-web] port ${PORT} is already in use — is another pi-web already running?`);
     console.error(`[pi-web] try: lsof -ti :${PORT} | xargs kill   (then rerun)`);

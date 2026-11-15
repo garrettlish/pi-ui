@@ -9,10 +9,16 @@
   "scripts": {
     "start": "node server.js",
     "test": "node test/smoke.js",
-    "check": "node --check server.js && node --check public/app.js && node --check test/smoke.js && node --check sdk/load.js && node --check sdk/host.js && node --check sdk/events.js && node --check sdk/images.js && node --check sdk/ui-context.js"
+    "check": "node --check server.js && node --check public/app.js && node --check test/smoke.js && node --check sdk/load.js && node --check sdk/host.js && node --check sdk/events.js && node --check sdk/images.js && node --check sdk/ui-context.js",
+    "typecheck": "tsc -p jsconfig.json && tsc -p jsconfig.web.json"
   },
   "engines": {
     "node": ">=18"
+  },
+  "// devDependencies": "Only used by `npm run typecheck` (see jsconfig.json). They are not needed to run or test pi-ui, which stays dependency-free: `node server.js` and `npm test` work on a bare checkout.",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.3"
   },
   "keywords": [
     "pi",

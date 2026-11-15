@@ -1,0 +1,24 @@
+{
+  "// why": "checkJs over the server and SDK. This is the cheap half of the TypeScript argument: no rewrite, no build step, but the pi SDK ships 262 .d.ts files, so every call into it is verified against the real API instead of guessed from its JS source. It found four genuine bugs when it was first turned on (an err.code on a bare Error, a SessionHost option the server passed but the class never declared, a #resolveTarget call omitting an optional field) that node --check cannot see.",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "es2022"
+    ],
+    "strict": false,
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ]
+  },
+  "// include": "test/smoke.js is syntax-checked by `npm run check` but not type-checked: it reads `await res.json()` about 120 times, which is `unknown` by default, and annotating those sites would add casts without adding safety.",
+  "include": [
+    "server.js",
+    "sdk/**/*.js"
+  ]
+}

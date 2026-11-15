@@ -136,6 +136,18 @@
       <!-- status and queued messages live directly above the input, where the
            eye already is; in the header they were easy to miss -->
       <div id="composer-dock">
+        <!-- The server is the only thing that can talk to the agent, so a dead
+             or unreachable server is a page-level condition, not a note in a
+             corner: it says what broke, what still works, and how to get back. -->
+        <div id="conn-banner" class="conn-banner hidden" role="alert" aria-live="assertive">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <div class="conn-copy">
+            <strong id="conn-title">server unavailable</strong>
+            <span id="conn-detail">this tab cannot reach the pi-ui server</span>
+          </div>
+          <span class="spacer"></span>
+          <button id="conn-retry" class="ghost" type="button">Retry now</button>
+        </div>
         <div id="status-bar" class="hidden">
           <span id="status-text"></span>
           <span class="spacer"></span>

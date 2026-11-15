@@ -26,6 +26,7 @@ changed is the backend, and one number in particular:
 - [What the SDK changed](#what-the-sdk-changed)
 - [HTTP API](#http-api)
 - [Configuration](#configuration)
+- [When the server goes away](#when-the-server-goes-away)
 - [Security notes](#security-notes)
 - [Development](#development)
 - [Limitations](#limitations)
@@ -59,6 +60,27 @@ records off it. Strict JSONL is LF-only, and a large response is a single LF-ter
 scan restarts from index 0 on every chunk until the line completes. That is a real cost, but it is a
 consequence of cost 2 — with the images offloaded the line is small and the problem disappears.
 In-process hosting removes the pipe entirely.
+
+### Rendering a stream in O(n), not O(n²)
+
+A transcript renders Markdown — headings, tables, code blocks. Parsing it again on every
+`text_delta` is both quadratic in the answer's length and visibly wrong: halfway through, an
+unterminated code fence or a lone backtick is not Markdown, so the page re-flowed under the reader
+with every chunk.
+
+So a streaming turn paints its source as literal text in one node, and each delta is a single
+`Text.appendData`. `message_end` renders the real Markdown once. Measured on a 494 KB answer over
+100 deltas in Chrome:
+
+```text
+re-render per delta (before)   15.1 ms median, 32.9 ms p95    1582 ms total
+append per delta (after)        0.0 ms median,  0.1 ms p95       3 ms total
+```
+
+Three smaller costs went with it: a 400-row sidebar rebuilt on every filter keystroke (~19 ms, now
+debounced 120 ms), a live session file re-parsed whole on every 8 s poll (now topped up from the
+bytes appended since the last read), and `ps`/`lsof` run synchronously on every bash call (now async,
+and a leftover's liveness is a signal-0 rather than a process table scan).
 
 ## Requirements
 
@@ -171,6 +193,12 @@ Three behaviours needed care and are worth knowing about:
 | `GET /api/processes?client=<id>` | Background processes that session's bash calls left running |
 | `POST /api/processes/kill` | `{client, pid}` — stop one recorded leftover |
 
+A leftover is tracked from the moment it appears to the moment it is gone, by whichever route gets
+there first. A kill goes through `/api/processes/kill`; a process that exits on its own is noticed by
+a 5 s sweep (one `kill(pid, 0)` per recorded pid, no subprocess) which pushes the shortened list over
+SSE. The sweep matters because the tabs *mirror* a pushed list: without it a dead process would keep
+its dock row and its badge until the resources panel happened to re-read `/api/processes`.
+
 `POST /api/test/inject` exists only when `PI_UI_TEST_HOOKS=1`; it replays an event through a
 session's live path so the smoke test can cover bash bracketing without a model.
 
@@ -186,6 +214,32 @@ session's live path so the smoke test can cover bash bracketing without a model.
 | `--pi <path>` | `PI_BIN` | `pi` on `PATH` | pi executable, used only for `pi mcp list` |
 | `--sdk <dir>` | `PI_UI_SDK` | the managed pi install | `@earendil-works/pi-coding-agent` package directory |
 | `--allow-remote` | `PI_WEB_ALLOW_REMOTE=1` | off | Drop the loopback request guards (reverse proxies) |
+
+## When the server goes away
+
+The browser is a thin client: every command is a POST to the server and every event arrives on its
+SSE stream. If that process dies or wedges, nothing works — so the page says so, rather than looking
+healthy while it silently fails.
+
+A banner in the composer dock takes over the moment contact is lost. It names the state, keeps the
+already-rendered transcript readable, blocks the composer (a disabled Send and a placeholder naming
+the fix, so a draft is never lost to a send that could not happen), and offers **Retry now**. The
+sidebar keeps a short version of the same fact. When the server returns, the banner clears and the tab
+re-opens its session automatically — a restart is a new process, so the old session object is gone
+even though its file is not.
+
+Two failures are distinguished, because they need different reactions:
+
+| What happened | How it is detected | Banner says |
+| --- | --- | --- |
+| process gone | `fetch` rejects, or the SSE stream closes | lost contact — start the server, then Retry |
+| process alive but wedged | a `/api/health` probe times out | no response from the server |
+
+The second case is why a probe exists at all. A hung server still owns the SSE connection, so
+`EventSource` fires no error and the stream simply produces nothing — indistinguishable from an idle
+session, and its `: ping` heartbeat is a comment `EventSource` never surfaces. The page therefore polls
+`/api/health` every 15 s (8 s timeout) for as long as it is open. A healthy-but-quiet server answers,
+an idle conversation stays green, and a wedge is caught inside half a minute.
 
 ## Security notes
 
@@ -209,12 +263,33 @@ session's live path so the smoke test can cover bash bracketing without a model.
 ## Development
 
 ```bash
-npm run check   # syntax check on the server, frontend, SDK modules and tests
-npm test        # end-to-end smoke test: HTTP surface, security guards, queue, dialogs, processes
+npm run check      # syntax check on the server, frontend, SDK modules and tests
+npm run typecheck  # checkJs over the server, SDK and frontend (needs `npm install`)
+npm test           # end-to-end smoke test: HTTP surface, security guards, queue, dialogs, processes
 ```
 
 `npm test` does not drive the UI, so for frontend changes also run the server and verify the changed
 flow in a browser.
+
+### Type checking without a build step
+
+The source stays JavaScript. `npm run typecheck` runs `tsc` in `checkJs` mode through two configs —
+`jsconfig.json` for the server and SDK (node types), `jsconfig.web.json` for `public/app.js` (DOM
+types) — with `noEmit`, so nothing is compiled and `node server.js` still runs the files directly.
+
+This is worth doing here for one reason: **the pi SDK ships `.d.ts` files.** `sdk/host.js` drives
+`AgentSession`, `SessionManager` and `createAgentSessionFromServices`, and against real declarations
+those calls are verified instead of guessed from JS source. Turning it on found four genuine bugs —
+`err.code` read off a bare `Error`, a `SessionHost` option the server passed but the class never
+declared, and a `#resolveTarget` call omitting an optional field — none of which `node --check`
+(a pure syntax check) can see.
+
+TypeScript was *not* adopted as the source language. Types do not survive to runtime, so a `.ts`
+rewrite would not make anything faster (measured: `server.ts` via Node's type stripping boots in
+361–372 ms versus 337–358 ms for `server.js`), and it would cost a build step plus `enum`/
+parameter-property restrictions under `--experimental-strip-types`. `test/smoke.js` is deliberately
+out of scope: it reads `await res.json()` ~120 times, which is `unknown`, and annotating those sites
+would add casts without adding safety.
 
 ## Limitations
 

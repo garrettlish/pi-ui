@@ -599,6 +599,63 @@ async function backgroundProcessChecks() {
       replayed.at(-1)?.snapshot === true,
       JSON.stringify(replayed.at(-1)).slice(0, 200)
     );
+
+    // A leftover can exit on its own — the user kills it from a terminal, or it
+    // finishes. Nothing about that arrives as an event, so the server has to
+    // notice and push. Without the sweep the row and its badge stayed until the
+    // resources panel was opened, which re-read the list as a side effect: the
+    // bug was that closing (or never opening) the panel kept a dead process on
+    // screen forever.
+    await post("/api/test/inject", {
+      client: "p1",
+      event: { type: "tool_execution_start", toolCallId: "call_sweep_bash", toolName: "bash" },
+    });
+    const sweepShell = spawn("/bin/sh", ["-c", "nohup sleep 600 > /dev/null 2>&1 & echo $!"], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let sweepOut = "";
+    sweepShell.stdout.on("data", (d) => (sweepOut += d));
+    await new Promise((resolve) => sweepShell.on("exit", resolve));
+    const sweepPid = Number(sweepOut.trim());
+    if (Number.isInteger(sweepPid) && sweepPid > 0) spawnedPids.push(sweepPid);
+    await post("/api/test/inject", {
+      client: "p1",
+      event: { type: "tool_execution_end", toolCallId: "call_sweep_bash", toolName: "bash" },
+    });
+
+    const sweepEs = await sseClient(`${base}/api/events?client=p1`);
+    const appeared = await sweepEs.waitFor(
+      (r) => r?.event === "background_processes" && (r.processes || []).some((p) => p.pid === sweepPid),
+      20000
+    );
+    check("a second leftover is recorded", appeared.length > 0 && sweepPid > 0, `pid ${sweepPid}`);
+
+    // Let it exit without touching /api/processes or the kill route: only the
+    // server's own sweep can notice this.
+    if (sweepPid > 0) {
+      try {
+        process.kill(sweepPid, "SIGTERM");
+      } catch {}
+    }
+    const receded = await sweepEs.waitFor(
+      (r) => r?.event === "background_processes" && !(r.processes || []).some((p) => p.pid === sweepPid),
+      20000
+    );
+    check(
+      "an exited leftover is swept and broadcast without a panel read",
+      receded.length > 0 && (receded.at(-1).processes || []).length === 0,
+      JSON.stringify(receded.at(-1)?.processes)
+    );
+    // The sweep must be a change, not a snapshot: the badge counts changes, so a
+    // snapshot here would leave the mark lit for a process that is already gone.
+    check(
+      "the sweep broadcast is a change, not a snapshot",
+      receded.length > 0 && receded.at(-1).snapshot === undefined,
+      JSON.stringify(receded.at(-1))
+    );
+    sweepEs.close();
+
     reconnected.close();
   } finally {
     killSpawned();
@@ -767,7 +824,7 @@ try {
   // it. Both halves are pinned here — the parse and the styled outcome.
   const appJs = await (await fetch(`${BASE}/app.js`)).text();
   check("app.js parses file: links", appJs.includes('a class="local-link"'));
-  check("app.js turns a local-link click into a copy", appJs.includes('closest("a.local-link")'));
+  check("app.js turns a local-link click into a copy", appJs.includes('closest?.("a.local-link")'));
   const css = await (await fetch(`${BASE}/style.css`)).text();
   check("style.css gives rendered links a palette color", css.includes(".assistant-text a {"));
 
@@ -777,6 +834,26 @@ try {
   check("app.js renders the Follow-up control as a toggle", appJs.includes('class: `turn-action followup-toggle'));
   check("app.js un-keeps a follow-up on a second press", appJs.includes("async function unsaveFollowup"));
   check("style.css paints the pressed Follow-up control", css.includes(".turn-action.kept {"));
+
+  // A dead or hung server used to look like a healthy page: the transcript and
+  // sidebar stayed on screen, the composer still accepted text, and the only
+  // sign was "connection lost — retrying…" in a sidebar corner (plus a bare
+  // "prompt failed: Failed to fetch" if the user tried to send). The banner,
+  // the composer block and the periodic health probe are what end that.
+  check("the composer dock carries a connection banner", html.includes('id="conn-banner"'));
+  check("the banner is an alert, not decoration", /id="conn-banner"[^>]*role="alert"/.test(html));
+  check("the banner offers a retry", html.includes('id="conn-retry"'));
+  check("app.js tracks an explicit connection state", appJs.includes('let connState = "live"'));
+  check("a transport failure is told apart from an HTTP error", appJs.includes("function isTransportError(err)"));
+  check("the composer refuses a send while unreachable", /if \(connState !== "live"\)[\s\S]{0,200}return;/.test(appJs));
+  check("the send button is disabled while unreachable", /function renderConnState\(\)[\s\S]{0,2600}send\.disabled = bad/.test(appJs));
+  check("the placeholder names the recovery step", appJs.includes("server unreachable — start it, then Retry now"));
+  // A hung server holds the SSE connection open and never errors, so liveness
+  // has to be probed rather than inferred from stream silence.
+  check("a health probe runs for the life of the page", appJs.includes("function startConnProbe()"));
+  check("the probe is started at boot", /connectEvents\(\);[\s\S]{0,300}startConnProbe\(\)/.test(appJs));
+  check("recovery re-attaches the session", appJs.includes("async function resumeSession()"));
+  check("style.css tints the banner", css.includes(".conn-banner {"));
 
   // Leftover background processes show in the composer dock as well as the
   // resources panel, each row with a Stop. The badge beside the resources icon
@@ -788,6 +865,23 @@ try {
   check("app.js gives each dock row a Stop", appJs.includes('text: "Stop", title: `Stop ${p.pid}'));
   check("app.js re-renders the dock rows with the status bar", /function renderStatus\(\)[\s\S]{0,400}renderProcessBar\(\)/.test(appJs));
   check("opening the resources panel acknowledges the badge", /function setResourcesOpen\(open\)[\s\S]{0,900}acknowledgeProcesses\(\)/.test(appJs));
+
+  // Streaming must not parse Markdown per delta: it paints literal text into one
+  // node and appends each delta to it. These are the three parts that make that
+  // safe — the fast path, the message_end hand-back to real Markdown, and the
+  // scroll follow that renderTranscript no longer provides for those deltas.
+  check("a delta appends to a text node instead of re-rendering", appJs.includes("slot.text.appendData(delta)"));
+  check("the delta path is abandoned when the node was replaced", /function applyStreamDelta[\s\S]{0,600}return false/.test(appJs));
+  check("a streaming block paints literal text", /item\.streaming\) \{[\s\S]{0,700}appendPlainText\(d/.test(appJs));
+  check(
+    "the finished message is re-rendered as Markdown",
+    /built\.node = item\.node;[\s\S]{0,120}built\.dirty = true;/.test(appJs)
+  );
+  check("a streaming delta keeps a pinned view at the bottom", /function applyStreamDelta[\s\S]{0,600}followViewIfPinned\(\)/.test(appJs));
+  check("scrolling up during a stream stops the follow", /addEventListener\("scroll"[\s\S]{0,300}streamPinned = transcriptAtBottom\(\)/.test(appJs));
+
+  // The sidebar filter is debounced so a typing burst rebuilds the list once.
+  check("the session filter is debounced", /session-filter"\)\.addEventListener\("input", queueSidebarRender\)/.test(appJs));
   check("the badge counts only unacknowledged processes", appJs.includes("n - state.processesAcked"));
   check("style.css lays the dock rows out as a stack", css.includes("#process-bar {"));
   check("style.css styles a dock row", css.includes(".proc-row {"));

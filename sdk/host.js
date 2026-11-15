@@ -219,6 +219,9 @@ export class SessionHost {
    * @param {object} options.sdk      the loaded SDK module
    * @param {string} options.cwd      default working directory
    * @param {string} options.sessionDir pi's session directory (for listing)
+   * @param {Map<string, { res: import("node:http").ServerResponse | null, key: string | null, detachedAt: number }>} options.clients
+   *   clientId -> SSE response. Owned by the server module; the host reads and
+   *   writes the same map so a broadcast can reach every attached tab.
    */
   constructor({ sdk, cwd, sessionDir, clients }) {
     this.sdk = sdk;
@@ -310,7 +313,8 @@ export class SessionHost {
   // open / attach
   // -------------------------------------------------------------------------
 
-  /** Resolve where a session lives and which cwd it belongs to. */
+  /** Resolve where a session lives and which cwd it belongs to.
+   *  @param {{ sessionFile?: string | null, cwd?: string | null }} target */
   async #resolveTarget({ sessionFile, cwd }) {
     if (!sessionFile) {
       return { cwd: cwd ? path.resolve(cwd) : this.cwd, file: null };

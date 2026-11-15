@@ -119,7 +119,7 @@ const state = {
   thinkingLevel: null,
   thinkingLevels: [],
   stats: null,
-  queued: { steering: [], followUp: [] },
+  queued: { steering: /** @type {string[]} */ ([]), followUp: /** @type {string[]} */ ([]) },
   sessions: [],
   /** saved follow-ups (summaries kept out of their session), newest first */
   followups: [],
@@ -167,7 +167,19 @@ applySidebarCollapsed(sidebarCollapsed());
 const CLIENT_ID = crypto.randomUUID();
 
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (err) {
+    // A transport failure is not a per-request error: the server is gone or
+    // hung, which breaks every other command too. Record it once, then rethrow
+    // so each caller still reports its own context.
+    if (isTransportError(err)) markServerUnreachable("no response from the server");
+    throw err;
+  }
+  // The server answered at all, which is what "reachable" means; an HTTP error
+  // below is a real per-request failure and must not be reported as a dead server.
+  markServerReachable();
   if (!res.ok) {
     // Surface the server's own message: a bare status code leaves the user with
     // no way to tell a stale session link from a real failure.
@@ -184,13 +196,21 @@ async function api(path, opts) {
 }
 
 async function cmd(type, extra = {}) {
-  const res = await fetch("/api/cmd", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client: CLIENT_ID, type, ...extra }),
-  });
+  let res;
+  try {
+    res = await fetch("/api/cmd", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: CLIENT_ID, type, ...extra }),
+    });
+  } catch (err) {
+    if (isTransportError(err)) markServerUnreachable("no response from the server");
+    throw err;
+  }
+  markServerReachable();
   const body = await res.json();
   if (body && body.success === false) {
+    /** @type {Error & { response?: unknown }} */
     const err = new Error(body.error || `${type} failed`);
     err.response = body;
     throw err;
@@ -465,20 +485,29 @@ function attachToolResult(m) {
   return false;
 }
 
-/** Build transcript items from ordered session entries (active branch). */
-function buildItemsFromEntries(entries) {
-  const items = [];
-  const callIndex = new Map(); // toolCallId -> {item, blockIdx}
+/** A transcript item. The union covers every `kind` `renderItem` switches on;
+ *  the fields with no per-kind meaning (`node`, `dirty`, `_live`, `_stream`,
+ *  `_rawMessage`) are the view's own bookkeeping and exist on all of them.
+ *
+ *  @typedef {{ kind: string, text?: string, title?: string, message?: any,
+ *              ts?: number, data?: any, entry?: any, images?: any[], files?: any[],
+ *              blocks?: any[], meta?: any, streaming?: boolean,
+ *              node?: Node, dirty?: boolean, _live?: boolean,
+ *              _rawMessage?: any, _stream?: Map<number, any>, [k: string]: any }} Item */
 
-  const findCall = (toolCallId) => {
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i];
-      if (it.kind !== "assistant") continue;
-      const bi = it.blocks.findIndex((b) => b.type === "toolcall" && b.call.id === toolCallId);
-      if (bi >= 0) return { item: it, blockIdx: bi };
-    }
-    return null;
-  };
+/** Build transcript items from ordered session entries (active branch).
+ *  @param {any[]} entries
+ *  @returns {Item[]} */
+function buildItemsFromEntries(entries) {
+  /** @type {Item[]} */
+  const items = [];
+  // toolCallId -> {item, blockIdx}. Written as calls are built and read when the
+  // matching result arrives, which used to be a backward scan of every assistant
+  // item per result — quadratic across a long session (a 350-call transcript did
+  // 350 scans of up to 350 items).
+  const callIndex = new Map();
+
+  const findCall = (toolCallId) => callIndex.get(toolCallId) || null;
 
   for (const entry of entries) {
     if (entry.type !== "message") {
@@ -664,7 +693,10 @@ function looksLikeDiff(text) {
   return false;
 }
 
-/** one diff row: sign gutter, old/new line-number gutters, then the body */
+/** One diff row: sign gutter, old/new line-number gutters, then the body.
+ *
+ *  @param {{ sign?: string, oldNum?: number | string, newNum?: number | string,
+ *            text?: string, cls?: string }} row */
 function diffRow({ sign = "", oldNum = "", newNum = "", text = "", cls = "" }) {
   const row = el("div", { class: `dline${cls ? ` ${cls}` : ""}` });
   row.append(
@@ -681,8 +713,8 @@ function diffRow({ sign = "", oldNum = "", newNum = "", text = "", cls = "" }) {
  *  Accepts two shapes:
  *  - pi edit diffs: rows like "+12 body" / "-  5 body" (sign, space-padded
  *    line number, body), " 12 body" for context and "     ..." skip markers —
- *    these never carry @@ hunk headers
- *  - unified diffs: @@ hunk headers, ---/+++ file headers, +/-/space rows —
+ *    these never carry `@@` hunk headers
+ *  - unified diffs: `@@` hunk headers, ---/+++ file headers, +/-/space rows —
  *    any preamble before the first hunk stays plain */
 function diffBlock(text) {
   const wrap = el("div", { class: "tc-text tc-diff" });
@@ -2302,20 +2334,39 @@ function renderItem(item) {
       const box = el("div", { class: "item item-assistant" });
       box.append(el("div", { class: "who", text: `pi · ${fmtTime(item.ts || (item.meta && item.meta.ts))}` }));
       const blocks = el("div", { class: "blocks" });
-      for (const b of item.blocks) {
+      // A streaming turn keeps a handle to each block's text node so a delta is
+      // one appendData (see applyStreamDelta) instead of re-parsing the whole
+      // turn's Markdown. Rebuilt here because this render replaced the nodes.
+      if (item.streaming) item._stream = new Map();
+      for (let bi = 0; bi < item.blocks.length; bi++) {
+        const b = item.blocks[bi];
         if (b.type === "text") {
           const d = el("div", { class: "assistant-text" });
-          // renderMarkdown escapes the source text up front, so the markup it
-          // emits is safe to parse; htmlFragment keeps it off innerHTML
-          d.replaceChildren(...htmlFragment(renderMarkdown(b.text || "")));
+          if (item.streaming) {
+            // Mid-flight text is not valid Markdown yet — an unterminated code
+            // fence, half a table row, a lone `` ` `` — so parsing it per delta
+            // re-formats the page under the reader AND costs O(n²) across the
+            // answer (measured: 2.8 ms/frame at 44k chars, 3.5 s for a 1.6k-delta
+            // answer). Paint the source literally while it streams; message_end
+            // renders the real Markdown once.
+            d.style.whiteSpace = "pre-wrap";
+            appendPlainText(d, b.text || "");
+            item._stream.set(bi, { type: "text", node: d, text: textNodeIn(d) });
+          } else {
+            // renderMarkdown escapes the source text up front, so the markup it
+            // emits is safe to parse; htmlFragment keeps it off innerHTML
+            d.replaceChildren(...htmlFragment(renderMarkdown(b.text || "")));
+          }
           blocks.append(d);
         } else if (b.type === "thinking") {
           if (b.redacted && !b.thinking) {
             blocks.append(el("div", { class: "item-thinking", text: "[redacted thinking]" }));
           } else {
             const wrap = el("details", { class: "item-thinking" });
-            wrap.append(el("summary", { text: "thinking" }), el("div", { text: b.thinking || "" }));
+            const body = el("div", { text: b.thinking || "" });
+            wrap.append(el("summary", { text: "thinking" }), body);
             wrap.style.whiteSpace = "pre-wrap";
+            if (item.streaming) item._stream.set(bi, { type: "thinking", node: body, text: textNodeIn(body) });
             blocks.append(wrap);
           }
         } else if (b.type === "toolcall") {
@@ -2326,6 +2377,8 @@ function renderItem(item) {
       }
       if (item.streaming && !item.blocks.length) blocks.append(el("div", { class: "dim", text: "…" }));
       box.append(blocks);
+      // A streaming turn has no metadata footer and no turn actions: its answer
+      // is not final, so the follow-up control would be premature.
       if (!item.streaming && item.meta) {
         item.meta._raw = item._rawMessage || item.meta;
         const m = renderAssistantMeta(item.meta);
@@ -2425,7 +2478,7 @@ transcriptEl.addEventListener("click", (e) => {
 // Document-level so it also covers a follow-up body and the summary document,
 // which are not inside #transcript.
 document.addEventListener("click", (e) => {
-  const link = e.target.closest("a.local-link");
+  const link = /** @type {Element | null} */ (e.target)?.closest?.("a.local-link");
   if (!link) return;
   e.preventDefault();
   navigator.clipboard.writeText(link.getAttribute("href")).then(
@@ -2436,6 +2489,11 @@ document.addEventListener("click", (e) => {
 
 function renderTranscript({ follow = true } = {}) {
   const nearBottom = transcriptAtBottom();
+  // A reader who scrolled up during a stream must not be dragged back by the
+  // next delta (which no longer goes through this function at all, see
+  // applyStreamDelta), and must resume following once they return to the
+  // bottom. Measured here, before this render changes the height.
+  streamPinned = nearBottom;
   const nodes = [];
   for (const item of state.items) {
     if (!item.node || item.dirty) {
@@ -2480,6 +2538,7 @@ function scheduleRender() {
 
 function scrollBottom() {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  streamPinned = true;
 }
 /** within a screen of the bottom, i.e. the view is following the stream */
 function transcriptAtBottom() {
@@ -2488,7 +2547,12 @@ function transcriptAtBottom() {
 function updateJumpButton() {
   $("#btn-jump").classList.toggle("hidden", transcriptAtBottom());
 }
-transcriptEl.addEventListener("scroll", updateJumpButton);
+transcriptEl.addEventListener("scroll", () => {
+  // A scroll during a stream is the reader taking over: honour it until they
+  // come back to the bottom, which is the same rule renderTranscript applies.
+  streamPinned = transcriptAtBottom();
+  updateJumpButton();
+});
 $("#btn-jump").addEventListener("click", scrollBottom);
 
 // ---------------------------------------------------------------------------
@@ -3119,7 +3183,11 @@ function resTag(text, kind = "") {
  *  detail lines the dialog has room for. `facts` renders as uppercase
  *  key/value pairs that wrap side by side; `tools` as chips. Every value
  *  arrives from pi or mcp.json, so it is set as text and never as markup.
- *  `actions` are trailing buttons (the process panel's Stop). */
+ *  `actions` are trailing buttons (the process panel's Stop).
+ *
+ *  @param {{ name: string, tag?: Node | null, sub?: string, desc?: string,
+ *            facts?: Array<[string, unknown]>, tools?: string[],
+ *            error?: string | null, actions?: Node[] }} item */
 function resItem({ name, tag, sub, desc, facts, tools, error, actions }) {
   const factNodes = (facts || [])
     .filter(([, v]) => v != null && v !== "")
@@ -3320,6 +3388,11 @@ function renderProcessBadge() {
   const n = (state.processes || []).length;
   const badge = $("#resources-badge");
   const btn = $("#btn-resources");
+  // A process can vanish without this tab having seen it — it exited, or it was
+  // stopped from another tab — so the acknowledged count must be clamped to the
+  // current length. Otherwise the next new process shows a badge of 2 for a
+  // list that only grew by one, and an emptied list keeps a stale count.
+  if (state.processesAcked > n) state.processesAcked = n;
   const fresh = Math.max(0, n - state.processesAcked);
   badge.textContent = fresh > 99 ? "99+" : String(fresh);
   badge.classList.toggle("hidden", fresh === 0);
@@ -3379,7 +3452,9 @@ function renderStatus() {
   // server a bash call started keeps running after the run ends
   renderProcessBar();
   $("#btn-abort").classList.toggle("hidden", !state.isStreaming);
-  const q = state.queued || {};
+  // `state.queued` is never null (boot sets both lanes), so reading it directly
+  // is safe; a `|| {}` fallback only widened the type to `{}`.
+  const q = state.queued;
   const qb = $("#queue-bar");
   qb.innerHTML = "";
   const chips = [];
@@ -3415,7 +3490,7 @@ let queueOpBusy = false;
  *  queue), so per-item undo = clear + re-queue the survivors in order. */
 async function removeQueued(lane, index) {
   if (queueOpBusy) return;
-  const q = state.queued || {};
+  const q = state.queued;
   const steering = [...(q.steering || [])];
   const followUp = [...(q.followUp || [])];
   const survivors = lane === "steer" ? steering : followUp;
@@ -4641,6 +4716,14 @@ async function sendPrompt() {
     toast(`${failed.map((a) => a.name).join(", ")} could not be read — remove it to send`, "error");
     return;
   }
+  // Refuse before clearing the composer: accepting text and then failing leaves
+  // the user typing into a page that cannot send, which is exactly the silent
+  // confusion this banner exists to end. The draft is untouched.
+  if (connState !== "live") {
+    toast("the server is unreachable — your prompt was not sent", "error", 8000);
+    renderConnState();
+    return;
+  }
   const images = ready.filter((a) => a.kind === "image");
   const docs = ready.filter((a) => a.kind === "doc");
   input.value = "";
@@ -4674,7 +4757,11 @@ async function sendPrompt() {
         return;
       } catch {}
     }
-    toast(`prompt failed: ${err.message}`, "error");
+    // A transport failure already raised the connection banner, which says what
+    // is wrong and offers Retry; repeating it as "prompt failed: Failed to fetch"
+    // is the message that made this confusing in the first place.
+    if (isTransportError(err)) toast("the server is unreachable — your prompt was not sent", "error", 8000);
+    else toast(`prompt failed: ${err.message}`, "error");
     restore();
   }
 }
@@ -4683,7 +4770,7 @@ async function abort() {
   try {
     await cmd("abort");
   } catch (err) {
-    toast(`abort failed: ${err.message}`, "error");
+    if (!isTransportError(err)) toast(`abort failed: ${err.message}`, "error");
   }
 }
 
@@ -4917,6 +5004,53 @@ async function waitPiReady(expectedFile) {
 // ---------------------------------------------------------------------------
 let currentAssistant = null; // streaming assistant item
 
+/** Put plain text into `parent` as a single text node, kept as `parent`'s only
+ *  child. A streaming block appends to that one node with `appendData`, which is
+ *  why the text must not be re-set (each `textContent =` allocates a new node
+ *  and drops the handle). */
+function appendPlainText(parent, text) {
+  const node = document.createTextNode(text);
+  parent.replaceChildren(node);
+  return node;
+}
+
+/** The single text node holding a streaming block's body. */
+function textNodeIn(parent) {
+  return parent.firstChild && parent.firstChild.nodeType === Node.TEXT_NODE ? parent.firstChild : null;
+}
+
+/** Append one `text_delta`/`thinking_delta` to an already-rendered block.
+ *
+ *  Returns false when the block's node is not in the tree or its text handle is
+ *  gone (a re-render replaced it) — the caller then falls back to marking the
+ *  item dirty and doing a full render, which is the old behaviour and always
+ *  correct. Returns true when the delta is on screen, so no render is queued at
+ *  all: appending a character to a text node is O(delta), where re-rendering the
+ *  turn is O(answer length) and Markdown parsing made it O(answer length) per
+ *  delta. */
+function applyStreamDelta(item, idx, field, delta) {
+  if (!item.node || !item.node.isConnected) return false;
+  const slot = item._stream && item._stream.get(idx);
+  if (!slot || !slot.text || !slot.text.isConnected) return false;
+  // `renderTranscript` is what normally keeps a following view pinned to the
+  // bottom, and this path skips it — so the follow has to happen here or the
+  // answer grows below the fold while the reader stays put. `followViewIfPinned`
+  // is a no-op for a reader who has scrolled up.
+  followViewIfPinned();
+  slot.text.appendData(delta);
+  return true;
+}
+
+/** Keep the transcript pinned to the bottom while streaming, without stealing
+ *  the scroll position from a reader who scrolled up. One boolean tracks whether
+ *  the last delta left the view at the bottom, because measuring after the text
+ *  grew would always report "scrolled up". */
+let streamPinned = true;
+function followViewIfPinned() {
+  if (!streamPinned) return;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
 function findStreamingAssistant() {
   if (currentAssistant && state.items.includes(currentAssistant)) return currentAssistant;
   for (let i = state.items.length - 1; i >= 0; i--) {
@@ -5023,9 +5157,13 @@ function handleEvent(record) {
       const item = findStreamingAssistant();
       if (!item) break;
       const idx = ev.contentIndex ?? 0;
+      // Deltas have a fast path: append into the block's text node and do not
+      // re-render at all. Anything that changes the block *structure* (a tool
+      // call appearing, a block ending) still takes the full path.
       if (ev.type === "text_delta") {
         const b = ensureBlock(item, idx, "text");
         b.text += ev.delta || "";
+        if (applyStreamDelta(item, idx, "text", ev.delta || "")) break;
         item.dirty = true;
       } else if (ev.type === "text_end") {
         ensureBlock(item, idx, "text").text = ev.content ?? "";
@@ -5033,6 +5171,7 @@ function handleEvent(record) {
       } else if (ev.type === "thinking_delta") {
         const b = ensureBlock(item, idx, "thinking");
         b.thinking = (b.thinking || "") + (ev.delta || "");
+        if (applyStreamDelta(item, idx, "thinking", ev.delta || "")) break;
         item.dirty = true;
       } else if (ev.type === "thinking_end") {
         const b = ensureBlock(item, idx, "thinking");
@@ -5068,7 +5207,11 @@ function handleEvent(record) {
         if (item) {
           const i = state.items.indexOf(item);
           state.items[i] = built;
+          // The new item is not streaming, so the next render replaces this
+          // node's plain text with real Markdown — reuse the element as the
+          // reconciliation anchor and let dirty force that rebuild.
           built.node = item.node;
+          built.dirty = true;
         } else {
           state.items.push(built);
         }
@@ -5916,7 +6059,21 @@ window.addEventListener("drop", (e) => {
 $("#btn-send").addEventListener("click", sendPrompt);
 $("#btn-abort").addEventListener("click", abort);
 $("#btn-new-session").addEventListener("click", newSession);
-$("#session-filter").addEventListener("input", renderSidebar);
+$("#session-filter").addEventListener("input", queueSidebarRender);
+/** Re-render the sidebar at most once per typing burst.
+ *
+ *  A filter keystroke rebuilt every row — 400 sessions is ~19 ms of DOM work, a
+ *  dropped frame per character on a large history — and only the final
+ *  keystroke's result is ever read. Same shape as `queueSearch`. */
+let sidebarTimer = null;
+function queueSidebarRender() {
+  if (sidebarTimer) clearTimeout(sidebarTimer);
+  sidebarTimer = setTimeout(() => {
+    sidebarTimer = null;
+    renderSidebar();
+  }, 120);
+}
+
 function showWorkspaces() {
   state.workspace = null;
   localStorage.removeItem(WS_KEY);
@@ -6167,13 +6324,235 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------------------------------------------------------------------------
-// SSE connection
+// connection state
 // ---------------------------------------------------------------------------
+// The server is the only path to the agent: every command is a POST to it and
+// every event comes from its SSE stream. When it dies or hangs, nothing works —
+// but without a status the page looks fine (transcript readable, sidebar full,
+// composer enabled) and a send silently fails with "Failed to fetch". So the
+// connection is tracked as one explicit state that drives the banner, the
+// sidebar note, the composer and the Retry control.
+//
+//   live      — the SSE stream is open; anything else is a real error to report
+//   retrying  — the stream dropped; EventSource is reconnecting, outcome unknown
+//   down      — a request failed at the transport layer, or retrying gave up
+let connState = "live";
+let connDownSince = 0;
+let connBannerDetail = "";
+let connReconnectTimer = null;
+/** The open SSE stream, so a reconnect can tell "still open" from "gave up". */
+let eventStream = null;
+let connProbeTimer = null;
+/** A request that has not answered in this long is treated as a hang. Node's
+ *  fetch has no default timeout, so a wedged server would otherwise leave the
+ *  promise (and the UI waiting on it) pending forever. */
+const CONN_REQUEST_TIMEOUT_MS = 30000;
+/** How often, and with what budget, the page asks the server whether it is
+ *  still there. */
+const CONN_PROBE_EVERY_MS = 15000;
+const CONN_PROBE_TIMEOUT_MS = 8000;
+
+/** True when a fetch failed because the server could not be reached at all, as
+ *  opposed to the server answering with an error. `fetch` rejects with a
+ *  TypeError for a refused connection, a DNS failure or an aborted request, and
+ *  never for a 4xx/5xx — those come back as a Response and `api()` turns them
+ *  into an Error with a message, which stays a real per-request error. */
+function isTransportError(err) {
+  return err instanceof TypeError || /failed to fetch|load failed|networkerror|err_connection/i.test(String(err?.message || ""));
+}
+
+/** Record that the server answered. Recovers from any non-live state. */
+function markServerReachable() {
+  if (connState === "live") return;
+  const wasDown = connState === "down";
+  connState = "live";
+  connDownSince = 0;
+  connBannerDetail = "";
+  renderConnState();
+  if (wasDown) {
+    toast("reconnected to the pi-ui server", "info", 3500);
+    // The tab missed every event while it was away, and its session may have
+    // been disposed (a session nobody is attached to is reaped), so replaying
+    // the conversation is the only way to be sure the view matches the server.
+    resumeSession().catch(() => {});
+  }
+}
+
+/** Record that the server is unreachable, with the reason to show. */
+function markServerUnreachable(detail, { transient = false } = {}) {
+  if (!connDownSince) connDownSince = Date.now();
+  if (detail) connBannerDetail = detail;
+  const next = transient ? "retrying" : "down";
+  // "down" is the stronger statement; a reconnect attempt must not downgrade it
+  if (connState !== next && !(next === "retrying" && connState === "down")) {
+    connState = next;
+  }
+  renderConnState();
+  if (!transient) scheduleReconnectProbe();
+}
+
+/** Ask the server whether it is back, on a backoff, while it is known to be
+ *  down. EventSource retries by itself, but a server that was killed and
+ *  restarted can leave the stream in a state where the browser's own retry
+ *  keeps failing; a plain health request is the reliable probe, and it is what
+ *  lets the page say "still down" instead of "retrying" forever. */
+function scheduleReconnectProbe() {
+  if (connReconnectTimer) return;
+  const attempt = () => {
+    connReconnectTimer = null;
+    if (connState === "live") return;
+    fetch("/api/health", { cache: "no-store", signal: timeoutSignal(CONN_REQUEST_TIMEOUT_MS) })
+      .then((res) => {
+        if (res.ok) {
+          markServerReachable();
+          if (!eventStream || eventStream.readyState === EventSource.CLOSED) connectEvents();
+        } else scheduleReconnectProbe();
+      })
+      .catch(() => scheduleReconnectProbe());
+  };
+  connReconnectTimer = setTimeout(attempt, 2500);
+}
+
+/** An AbortSignal that fires after `ms`, so a hung request fails like an
+ *  unreachable one instead of pending forever. */
+function timeoutSignal(ms) {
+  return typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined;
+}
+
+/** Poll the server's liveness endpoint for as long as the page is open.
+ *
+ *  This is the only way to catch a server that is *hung* rather than gone: the
+ *  process still owns the SSE connection, so no `onerror` fires and the stream
+ *  just never produces anything — which is also what an idle session looks
+ *  like. Silence on the stream therefore proves nothing, and the server's own
+ *  `: ping` comments are invisible to `EventSource`. An explicit health probe
+ *  distinguishes the two: it answers when the process is healthy and times out
+ *  when it is wedged.
+ *
+ *  The probe is deliberately cheap and unconditional — `/api/health` does no
+ *  disk work — so a 15 s interval costs nothing while removing the "page looks
+ *  fine, nothing works" failure entirely. */
+function startConnProbe() {
+  if (connProbeTimer) return;
+  connProbeTimer = setInterval(async () => {
+    try {
+      const res = await fetch("/api/health", {
+        cache: "no-store",
+        signal: timeoutSignal(CONN_PROBE_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        // A probe only proves reachability; it does not re-open the session.
+        // `markServerReachable` handles the recovery path once.
+        if (connState === "live") return;
+        markServerReachable();
+        if (!eventStream || eventStream.readyState === EventSource.CLOSED) connectEvents();
+      } else {
+        markServerUnreachable(`the server answered HTTP ${res.status}`);
+      }
+    } catch {
+      markServerUnreachable("no response from the server");
+    }
+  }, CONN_PROBE_EVERY_MS);
+}
+
+/** Reason text for the banner, kept short enough for one ellipsized line. */
+function connReason() {
+  if (connBannerDetail) return connBannerDetail;
+  if (connState === "retrying") return "the live event stream dropped — reconnecting…";
+  return "no response from the server";
+}
+
+/** Push the connection state into the DOM: banner, sidebar note, composer. */
+function renderConnState() {
+  const banner = $("#conn-banner");
+  const bad = connState !== "live";
+  banner.classList.toggle("hidden", !bad);
+  banner.classList.toggle("retrying", connState === "retrying");
+  if (bad) {
+    $("#conn-title").textContent =
+      connState === "down" ? "lost contact with the pi-ui server" : "pi-ui server not responding";
+    $("#conn-detail").textContent = connReason();
+    $("#conn-retry").disabled = connState === "retrying";
+    $("#conn-retry").textContent = connState === "retrying" ? "Retrying…" : "Retry now";
+  }
+
+  // The sidebar note is the same fact in the corner it has always used; it is
+  // no longer the only place, and it names the state rather than "retrying".
+  const status = $("#pi-status");
+  if (bad) {
+    status.textContent = connState === "down" ? "server unreachable" : "reconnecting…";
+    status.className = "pi-status bad";
+  }
+
+  // Sending cannot work while the server is gone, so the composer says so
+  // instead of accepting text and failing after the fact. The draft is kept:
+  // whatever the user typed is still there when the server comes back.
+  const input = $("#input");
+  if (bad) {
+    if (!input.dataset.connPlaceholder) input.dataset.connPlaceholder = input.placeholder;
+    input.placeholder = "server unreachable — start it, then Retry now";
+    input.classList.add("conn-blocked");
+  } else {
+    if (input.dataset.connPlaceholder) {
+      input.placeholder = input.dataset.connPlaceholder;
+      delete input.dataset.connPlaceholder;
+    }
+    input.classList.remove("conn-blocked");
+  }
+  const send = $("#btn-send");
+  if (send) send.disabled = bad;
+}
+
+/** Retry button: probe once, now. */
+async function retryConnection() {
+  const btn = $("#conn-retry");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    const res = await fetch("/api/health", { cache: "no-store" });
+    if (!res.ok) throw new Error(`health check returned HTTP ${res.status}`);
+    markServerReachable();
+    if (!eventStream || eventStream.readyState === EventSource.CLOSED) connectEvents();
+    await resumeSession();
+  } catch (err) {
+    markServerUnreachable(isTransportError(err) ? "no response from the server" : err.message);
+    // Re-arm the button so a second press is possible.
+    btn.disabled = false;
+    btn.textContent = "Retry now";
+  }
+}
+
+/** Re-attach this tab to its session after the server comes back.
+ *
+ *  A restart is a new process: the old session may have been reaped, and even
+ *  when the file is the same the in-memory run is gone. Opening again is what
+ *  makes the conversation live rather than a frozen screenshot. */
+async function resumeSession() {
+  await api("/api/open", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client: CLIENT_ID, sessionFile: state.sessionFile || undefined, cwd: state.cwd }),
+  });
+  await refresh({ sessions: true, stats: true });
+  loadModels();
+  loadProcesses({ acknowledge: true });
+}
+
+$("#conn-retry").addEventListener("click", retryConnection);
+
 function connectEvents() {
   // one SSE stream per tab: only events of the session this tab is attached
   // to arrive here, so parallel tabs never interleave each other's output
+  eventStream?.close();
   const es = new EventSource(`/api/events?client=${encodeURIComponent(CLIENT_ID)}`);
+  eventStream = es;
+  es.onopen = () => {
+    // "hello" is the server's own greeting; onopen only says the TCP stream is
+    // up, which is enough to know the process is alive again.
+    markServerReachable();
+  };
   es.onmessage = (m) => {
+    markServerReachable();
     try {
       handleEvent(JSON.parse(m.data));
     } catch (err) {
@@ -6181,8 +6560,15 @@ function connectEvents() {
     }
   };
   es.onerror = () => {
-    $("#pi-status").textContent = "connection lost — retrying…";
-    $("#pi-status").className = "pi-status bad";
+    // EventSource reconnects by itself while readyState is CONNECTING. That is
+    // genuinely "retrying", not "down" — but if the server is gone the browser
+    // retries forever without ever succeeding, so the probe and the banner are
+    // what stop the page from looking healthy while nothing works.
+    if (es.readyState === EventSource.CLOSED) {
+      markServerUnreachable("the live event stream was closed by the server");
+    } else {
+      markServerUnreachable("", { transient: true });
+    }
   };
 }
 
@@ -6191,9 +6577,24 @@ function connectEvents() {
 // ---------------------------------------------------------------------------
 (async function boot() {
   applyTheme(localStorage.getItem("piweb-theme") || DEFAULT_THEME);
+  // Paint the initial state first: if the server is already gone, the banner
+  // and the composer note must be on screen before any request is awaited, so
+  // the page never shows an enabled composer over a dead server.
+  renderConnState();
   const cfg = await api("/api/config").catch(() => null);
   state.cwd = cfg?.cwd;
+  // A boot where the config never arrived means there is nothing to attach to.
+  // Do not fall through to the rest of boot: it would issue a dozen more fetches
+  // that can only fail, and each would repaint the same error.
+  if (!cfg) {
+    markServerUnreachable("this tab cannot reach the pi-ui server");
+    return;
+  }
   connectEvents();
+  // Liveness polling starts with the first successful connection and runs for
+  // the life of the page: an SSE stream cannot report a *hung* server, so this
+  // is what notices one.
+  startConnProbe();
   // Sessions are no longer auto-started by the server: this tab opens its own
   // (a fresh one in the server cwd; the hash deep link below may re-point it
   // to an existing file, attaching to that file's process if one is live).
@@ -6214,7 +6615,13 @@ function connectEvents() {
   // since this tab has now seen them. A process that starts later raises it.
   loadProcesses({ acknowledge: true });
   // poll the session list so the sidebar's background-run dots stay current
-  setInterval(() => loadSessions().catch(() => {}), 8000);
+  // poll the session list so the sidebar's background-run dots stay current.
+  // Skipped while the server is known to be unreachable: the reconnect probe is
+  // already polling health, and a second poll would only add failing requests
+  // (and console noise) behind a banner that already says what is wrong.
+  setInterval(() => {
+    if (connState === "live") loadSessions().catch(() => {});
+  }, 8000);
   // deep link: #ws=<cwd>&session=<file|new>[&followup=<id>] — open the hashed
   // session if it differs from what this tab started with
   const hs = hashState();
