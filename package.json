@@ -1,0 +1,26 @@
+{
+  "name": "pi-ui",
+  "version": "0.2.0",
+  "description": "A local web UI for the pi coding agent, embedding the pi SDK in-process: streamed transcripts, chat-history browsing, and a full inspector for every LLM and tool call.",
+  "type": "module",
+  "bin": {
+    "pi-ui": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.js",
+    "check": "node --check server.js && node --check public/app.js && node --check test/smoke.js && node --check sdk/load.js && node --check sdk/host.js && node --check sdk/events.js && node --check sdk/images.js && node --check sdk/ui-context.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "pi",
+    "coding-agent",
+    "web-ui",
+    "sdk",
+    "llm",
+    "agent"
+  ],
+  "license": "MIT"
+}

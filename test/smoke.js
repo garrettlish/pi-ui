@@ -1,0 +1,1339 @@
+#!/usr/bin/env node
+/**
+ * End-to-end smoke test for pi-web. No dependencies, no test framework.
+ *
+ *   node test/smoke.js
+ *
+ * Starts a throwaway server on a free port, then checks the things that have
+ * actually broken before: the page and its assets are served, the HTTP API
+ * answers, foreign hosts and cross-origin writes are rejected, and path
+ * traversal cannot escape public/.
+ *
+ * It does NOT spawn a real pi agent — that needs credentials and a model, and
+ * belongs in a manual check. When pi is installed the script additionally
+ * verifies that a session can be opened.
+ */
+import { spawn } from "node:child_process";
+import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const PORT = Number(process.env.SMOKE_PORT || 3300 + Math.floor(Math.random() * 400));
+const BASE = `http://127.0.0.1:${PORT}`;
+
+// A throwaway session directory keeps /api/sessions and /api/search
+// deterministic and independent of whatever real sessions this machine has.
+const FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-smoke-"));
+// Follow-ups live in their own directory, so the smoke test exercises the real
+// save/list/read/delete path without touching ~/.pi/followups.
+const FOLLOWUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-followups-"));
+function writeFixture(dirName, file, lines) {
+  const dir = path.join(FIXTURE_DIR, dirName);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, file), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+}
+
+/** One-page PDF whose only content is one text run, built by hand so the test
+ *  needs no fixture file. Object 4 is the page content stream. */
+function minimalPdf(line) {
+  const content = `BT /F1 12 Tf 72 720 Td (${line}) Tj ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let pdf = "%PDF-1.4\n";
+  objects.forEach((body, i) => {
+    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  // No xref table: the extractor scans for object headers, and a test fixture
+  // with a hand-computed offset table would be more fragile than useful.
+  return `${pdf}trailer\n<< /Root 1 0 R /Size ${objects.length + 1} >>\n%%EOF\n`;
+}
+
+/** An uncompressed .docx: a ZIP with the one part that carries the text. Written
+ *  by hand for the same reason — no dependency, no binary fixture in the repo.
+ *  `corrupt` writes document.xml as deflate-marked garbage, the shape a truncated
+ *  or damaged file has. */
+function minimalDocx(escapedText, { corrupt = false } = {}) {
+  const files = [
+    ["[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'],
+    [
+      "word/document.xml",
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${escapedText}</w:t></w:r></w:p></w:body></w:document>`,
+    ],
+  ];
+  const table = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc32 = (buf) => {
+    let crc = 0xffffffff;
+    for (const byte of buf) crc = table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const [name, text] of files) {
+    // document.xml can be written as a deflate-marked entry that is not deflate
+    // data, which is what a damaged file looks like on disk
+    const isCorrupt = corrupt && name === "word/document.xml";
+    const data = isCorrupt ? Buffer.from([0xff, 0xff, 0xff, 0xff]) : Buffer.from(text, "utf8");
+    const method = isCorrupt ? 8 : 0;
+    const nameBuf = Buffer.from(name, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(crc32(data), 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(method, 10);
+    central.writeUInt32LE(crc32(data), 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBuf.length, 28);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, nameBuf, data);
+    centrals.push(central, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+  const directory = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, directory, end]);
+}
+
+let failures = 0;
+function check(name, ok, detail = "") {
+  if (ok) console.log(`  ok    ${name}`);
+  else {
+    failures++;
+    console.error(`  FAIL  ${name}${detail ? ` — ${detail}` : ""}`);
+  }
+}
+
+async function waitForServer(timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${BASE}/api/health`);
+      if (res.ok) return true;
+    } catch {
+      // not listening yet
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+/** Status code of a raw request; needed because fetch() ignores a Host header override. */
+function rawRequestStatus(pathname, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "127.0.0.1", port: PORT, path: pathname, method: "GET", headers },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      }
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+// Two workspaces, each with one session. The fixture exercises every searchable
+// channel and two of the exclusion rules (system prompt, thinking blocks).
+writeFixture("--tmp-ws-alpha--", "2026-01-01T00-00-00-000Z_aaaa.jsonl", [
+  { type: "session", version: 3, id: "aaaa", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp/ws-alpha" },
+  {
+    type: "message",
+    id: "u1",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:01.000Z",
+    message: { role: "user", content: [{ type: "text", text: "please inspect the flibbertigibbet module" }] },
+  },
+  {
+    type: "message",
+    id: "a1",
+    parentId: "u1",
+    timestamp: "2026-01-01T00:00:02.000Z",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "SEARCHTHINKINGONLY private reasoning" },
+        { type: "text", text: "the flibbertigibbet module exports nothing useful" },
+        { type: "toolCall", id: "call-1", name: "grep", arguments: { pattern: "SEARCHTOOLARG flibbertigibbet" } },
+      ],
+    },
+  },
+  {
+    type: "message",
+    id: "r1",
+    parentId: "a1",
+    timestamp: "2026-01-01T00:00:03.000Z",
+    message: { role: "toolResult", toolCallId: "call-1", toolName: "grep", content: [{ type: "text", text: "SEARCHTOOLOUT flibbertigibbet.js:1" }] },
+  },
+  {
+    type: "message",
+    id: "a3",
+    parentId: "r1",
+    timestamp: "2026-01-01T00:00:04.000Z",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-sub", name: "subagent", arguments: { agent: "reviewer", task: "SEARCHSUBTASK review auth" } }],
+    },
+  },
+  // A subagent fan-out: the tool result text is the parent's combined answer,
+  // while each child's own output lives only in details.results[].finalOutput.
+  {
+    type: "message",
+    id: "r2",
+    parentId: "a3",
+    timestamp: "2026-01-01T00:00:05.000Z",
+    message: {
+      role: "toolResult",
+      toolCallId: "call-sub",
+      toolName: "subagent",
+      content: [{ type: "text", text: "combined answer" }],
+      details: {
+        mode: "single",
+        results: [{ index: 0, agent: "reviewer", exitCode: 0, finalOutput: "SEARCHCHILDOUT the token check trusts the alg header" }],
+      },
+    },
+  },
+  // The run's last turn, and the only one that settles: the answer text above
+  // (a1) was mid-loop, so the summary scope must not reach it.
+  {
+    type: "message",
+    id: "a4",
+    parentId: "r2",
+    timestamp: "2026-01-01T00:00:06.000Z",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "SEARCHSUMMARYANSWER the module is unused, nothing to change" }],
+    },
+  },
+]);
+writeFixture("--tmp-ws-beta--", "2026-02-02T00-00-00-000Z_bbbb.jsonl", [
+  { type: "session", version: 3, id: "bbbb", timestamp: "2026-02-02T00:00:00.000Z", cwd: "/tmp/ws-beta" },
+  {
+    type: "message",
+    id: "u2",
+    parentId: null,
+    timestamp: "2026-02-02T00:00:01.000Z",
+    message: { role: "user", content: [{ type: "text", text: "unrelated request about widgets" }] },
+  },
+  {
+    type: "message",
+    id: "s1",
+    parentId: null,
+    timestamp: "2026-02-02T00:00:02.000Z",
+    message: { role: "system", content: "SEARCHSYSTEMONLY system preamble" },
+  },
+  {
+    type: "message",
+    id: "a2",
+    parentId: "u2",
+    timestamp: "2026-02-02T00:00:03.000Z",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "the widgets are fine, and so is flibbertigibbet SEARCHRESPONSEONLY" }],
+    },
+  },
+  // A run cut off by the user has an answer, but it is an interruption rather
+  // than a conclusion, so the summary scope must not reach it.
+  {
+    type: "message",
+    id: "u4",
+    parentId: "a2",
+    timestamp: "2026-02-02T00:00:04.000Z",
+    message: { role: "user", content: [{ type: "text", text: "now check the gadget" }] },
+  },
+  {
+    type: "message",
+    id: "a5",
+    parentId: "u4",
+    timestamp: "2026-02-02T00:00:05.000Z",
+    message: {
+      role: "assistant",
+      stopReason: "aborted",
+      content: [{ type: "text", text: "SEARCHABORTEDANSWER the gadget is" }],
+    },
+  },
+]);
+
+// A skill invocation is pi's expansion of a slash command: the whole SKILL.md
+// wrapped in pi's own <skill> block, then the prompt the user typed. Its body is
+// instruction text the agent reads, not something the user wrote, so the title
+// and the prompt index must show the invocation and the prompt only.
+writeFixture("--tmp-ws-gamma--", "2026-03-03T00-00-00-000Z_cccc.jsonl", [
+  { type: "session", version: 3, id: "cccc", timestamp: "2026-03-03T00:00:00.000Z", cwd: "/tmp/ws-gamma" },
+  {
+    type: "message",
+    id: "u3",
+    parentId: null,
+    timestamp: "2026-03-03T00:00:01.000Z",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: [
+            '<skill name="skill:review-helper" location="/tmp/skills/review-helper/SKILL.md">',
+            "References are relative to /tmp/skills/review-helper.",
+            "",
+            "# Review Helper",
+            "",
+            "SKILLBODYONLY follow these steps when reviewing.",
+            "</skill>",
+            "",
+            "SKILLPROMPTTERM please review the diff",
+          ].join("\n"),
+        },
+      ],
+    },
+  },
+]);
+
+// A prompt the composer sent with a document carries the extracted text in a
+// block of pi-web's own. That text is what the model read, not what the user
+// typed, so the session title and the prompt index must show the file name and
+// leave the body alone — a 100 KB PDF would otherwise match every query.
+writeFixture("--tmp-ws-delta--", "2026-04-04T00-00-00-000Z_dddd.jsonl", [
+  { type: "session", version: 3, id: "dddd", timestamp: "2026-04-04T00:00:00.000Z", cwd: "/tmp/ws-delta" },
+  {
+    type: "message",
+    id: "u4",
+    parentId: null,
+    timestamp: "2026-04-04T00:00:01.000Z",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: [
+            "DOCPROMPTTERM summarize this",
+            "",
+            '<attached-file name="quarterly &amp; report.pdf" kind="pdf" pages="2">',
+            "ATTACHEDBODYONLY revenue rose twelve percent",
+            "</attached-file>",
+          ].join("\n"),
+        },
+      ],
+    },
+  },
+]);
+
+const server = spawn(
+  process.execPath,
+  [path.join(ROOT, "server.js"), "--port", String(PORT), "--session-dir", FIXTURE_DIR, "--followup-dir", FOLLOWUP_DIR],
+  {
+    cwd: ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+  }
+);
+let serverLog = "";
+server.stdout.on("data", (d) => (serverLog += d));
+server.stderr.on("data", (d) => (serverLog += d));
+
+function stopServer() {
+  if (!server.killed) server.kill("SIGTERM");
+}
+
+/** Open an SSE stream and expose records as they arrive, so one stream can be
+ *  read across several assertions (a second reader on the same body throws). */
+async function sseClient(url) {
+  const ctl = new AbortController();
+  const res = await fetch(url, { signal: ctl.signal });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const queue = [];
+  const waiters = [];
+  let buffer = "";
+  let closed = false;
+  const wake = () => {
+    for (const w of waiters.splice(0)) w();
+  };
+  (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          try {
+            queue.push(JSON.parse(line.slice(6)));
+          } catch {
+            continue; // keepalive or malformed frame
+          }
+          wake();
+        }
+      }
+    } catch {
+      // aborted by close()
+    }
+    closed = true;
+    wake();
+  })();
+  return {
+    /** Records up to and including the first one `predicate` accepts; empty
+     *  when the timeout expires or the stream ends first. */
+    async waitFor(predicate, timeoutMs = 5000) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const i = queue.findIndex(predicate);
+        if (i >= 0) return queue.splice(0, i + 1);
+        const left = deadline - Date.now();
+        if (closed || left <= 0) return [];
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, left);
+          waiters.push(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+    },
+    close() {
+      ctl.abort();
+    },
+  };
+}
+
+/** Background processes a bash call leaves behind.
+ * * The failure this pins: `nohup node server/x.js &` inside a bash tool call keeps
+ * running after the call, the run and the agent process — reparented to init,
+ * with nothing in the RPC stream ever mentioning it again. Without this the
+ * server is invisible from the UI and can only be found with `ps`.
+ *
+ * The agent's bash bracketing runs on the live event path, and driving a real
+ * tool call needs a model and credentials. So the server is started with
+ * PI_UI_TEST_HOOKS=1 and the test injects the two `tool_execution_*` events a
+ * real call would produce, around a genuinely detached child this test starts.
+ * The code under test — the before/after process-table diff — is untouched. */
+async function backgroundProcessChecks() {
+  const port = PORT + 2;
+  const base = `http://127.0.0.1:${port}`;
+  const child = spawn(
+    process.execPath,
+    [path.join(ROOT, "server.js"), "--port", String(port), "--session-dir", FIXTURE_DIR],
+    {
+      cwd: ROOT,
+      env: { ...process.env, PI_UI_TEST_HOOKS: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+  let log = "";
+  child.stdout.on("data", (d) => (log += d));
+  child.stderr.on("data", (d) => (log += d));
+
+  const post = async (pathname, body) =>
+    (
+      await fetch(`${base}${pathname}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    ).json();
+  const spawnedPids = [];
+  const killSpawned = () => {
+    for (const pid of spawnedPids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+    }
+
+  };
+
+  const exists = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      // EPERM means it is there but owned by someone else — alive either way.
+      return err.code === "EPERM";
+    }
+  };
+
+  try {
+    const wsDir = path.join(FIXTURE_DIR, "--proc-ws--");
+    const sessionFile = path.join(wsDir, "2026-05-05T00-00-00-000Z_pp.jsonl");
+    writeFixture("--proc-ws--", path.basename(sessionFile), [
+      { type: "session", version: 3, id: "pp", timestamp: "2026-05-05T00:00:00.000Z", cwd: FIXTURE_DIR },
+    ]);
+
+    for (let i = 0; i < 100; i++) {
+      try {
+        if ((await fetch(`${base}/api/health`)).ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const es = await sseClient(`${base}/api/events?client=p1`);
+    await es.waitFor((r) => r?.event === "hello", 3000);
+    await post("/api/open", { client: "p1", sessionFile });
+
+    // Nothing left running yet: the panel must be empty, not merely unloaded.
+    const none = await (await fetch(`${base}/api/processes?client=p1`)).json();
+    check("/api/processes starts empty for a fresh session", Array.isArray(none.processes) && none.processes.length === 0, JSON.stringify(none).slice(0, 200));
+
+    // Inject the two `tool_execution_*` events a real bash call produces, then
+    // start a genuinely detached child between them so the server's before/after
+    // process-table diff has something to find.
+    const injected = await post("/api/test/inject", {
+      client: "p1",
+      event: { type: "tool_execution_start", toolCallId: "call_smoke_bash", toolName: "bash" },
+    });
+    check("the test hook is reachable", injected?.ok === true, JSON.stringify(injected).slice(0, 160));
+    // Started exactly the way a real bash call starts one: an intermediate shell
+    // in its own process group (pi spawns the tool's shell detached), which
+    // backgrounds the child and exits. The child inherits that group and outlives
+    // it, so the group id has no live leader left — the signature the diff looks
+    // for. Launching it in the test's own group would keep that group alive and
+    // make the child look independent.
+    const shell = spawn("/bin/sh", ["-c", "nohup sleep 120 > /dev/null 2>&1 & echo $!"], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let shellOut = "";
+    shell.stdout.on("data", (d) => (shellOut += d));
+    await new Promise((resolve) => shell.on("exit", resolve));
+    const fakePid = Number(shellOut.trim());
+    if (Number.isInteger(fakePid) && fakePid > 0) spawnedPids.push(fakePid);
+    await post("/api/test/inject", {
+      client: "p1",
+      event: { type: "tool_execution_end", toolCallId: "call_smoke_bash", toolName: "bash" },
+    });
+
+    // Wait for the broadcast that actually carries the leftover: attaching to a
+    // session also emits an empty snapshot, so matching the first one would read
+    // that instead.
+    const batch = await es.waitFor((r) => r?.event === "background_processes" && (r.processes || []).length > 0, 15000);
+    const pushedList = batch.filter((r) => r?.event === "background_processes").at(-1)?.processes || [];
+    check(
+      "a leftover is broadcast to the attached tab",
+      pushedList.length > 0,
+      batch.length ? JSON.stringify(batch).slice(0, 300) : "no background_processes record"
+    );
+    check(
+      "the broadcast names the process that was left running",
+      fakePid ? pushedList.some((p) => p.pid === fakePid) : false,
+      `fake pid ${fakePid} vs ${JSON.stringify(pushedList).slice(0, 300)}`
+    );
+
+    const listed = await (await fetch(`${base}/api/processes?client=p1`)).json();
+    check(
+      "/api/processes lists the leftover with a pid and command",
+      listed.processes?.some((p) => p.pid === fakePid && typeof p.command === "string" && p.command.length > 0),
+      JSON.stringify(listed).slice(0, 300)
+    );
+
+    // The route is an allow-list, not "kill any pid": the whole point of the
+    // panel is that it cannot be turned into arbitrary process control.
+    const foreign = await post("/api/processes/kill", { client: "p1", pid: 1 });
+    check("killing a pid this session did not start is refused", foreign?.ok !== true, JSON.stringify(foreign).slice(0, 200));
+    check("a refused kill leaves pid 1 alive", exists(1));
+
+    const killed = await post("/api/processes/kill", { client: "p1", pid: fakePid });
+    check("killing a recorded leftover is accepted", killed?.ok === true, JSON.stringify(killed).slice(0, 200));
+
+    // SIGTERM lands immediately; the entry is dropped without waiting for the
+    // SIGKILL backstop.
+    let gone = false;
+    for (let i = 0; i < 40; i++) {
+      if (!exists(fakePid)) {
+        gone = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    check("the killed leftover is gone", gone, `pid ${fakePid} still alive`);
+
+    const after = await (await fetch(`${base}/api/processes?client=p1`)).json();
+    check(
+      "/api/processes drops a stopped process",
+      !(after.processes || []).some((p) => p.pid === fakePid),
+      JSON.stringify(after).slice(0, 300)
+    );
+
+    // A page reload reconnects to a process that may still hold leftovers, and
+    // nothing is broadcast until the next bash call — so the snapshot rides the
+    // attach, exactly like the queue snapshot above.
+    es.close();
+    const reconnected = await sseClient(`${base}/api/events?client=p1`);
+    const replayed = await reconnected.waitFor((r) => r?.event === "background_processes", 3000);
+    check(
+      "re-attaching replays the background process list",
+      replayed.length > 0 && Array.isArray(replayed.at(-1)?.processes),
+      JSON.stringify(replayed).slice(0, 300)
+    );
+    // A replayed list is a hand-over, not a change: the tab that arrives late
+    // shows the rows but must not claim a process just started, or every reload
+    // would raise the badge for a server that was already there.
+    check(
+      "a replayed process list is marked as a snapshot",
+      replayed.at(-1)?.snapshot === true,
+      JSON.stringify(replayed.at(-1)).slice(0, 200)
+    );
+    reconnected.close();
+  } finally {
+    killSpawned();
+    child.kill("SIGTERM");
+    if (failures && log.trim()) console.error(`\nbackground-process server log:\n${log.trim()}`);
+  }
+}
+
+
+/** The in-process ExtensionUi replaces the RPC bridge's dialog plumbing. A
+ *  resolution bug here would hang any extension that asks the user a question,
+ *  so the promise contract is checked directly rather than through a dialog. */
+async function extensionUiChecks() {
+  const { ExtensionUi } = await import(path.join(ROOT, "sdk", "ui-context.js"));
+  const emitted = [];
+  const ui = new ExtensionUi((r) => emitted.push(r));
+  const ctx = ui.context();
+  const settle = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+
+  const pick = ctx.select("Pick one", ["a", "b"]);
+  await settle();
+  const selectReq = emitted.find((e) => e.method === "select");
+  check("a dialog request carries method, title, options and an id", Boolean(selectReq?.id && selectReq?.title && selectReq?.options?.length === 2), JSON.stringify(selectReq).slice(0, 160));
+  ui.answer(selectReq.id, { value: "b" });
+  check("an answered select resolves with the chosen value", (await pick) === "b");
+
+  const sure = ctx.confirm("Sure?", "do it");
+  await settle();
+  ui.answer(emitted.filter((e) => e.method === "confirm").at(-1).id, { confirmed: false });
+  check("an answered confirm resolves with the boolean", (await sure) === false);
+
+  const named = ctx.input("Name", "placeholder");
+  await settle();
+  ui.answer(emitted.filter((e) => e.method === "input").at(-1).id, { cancelled: true });
+  check("a cancelled input resolves undefined", (await named) === undefined);
+
+  const slow = ctx.select("Slow", ["x"], { timeout: 40 });
+  check("a dialog that times out resolves its default", (await slow) === undefined);
+
+  check("an unknown dialog id is refused, not crashed on", ui.answer("no-such-id", { value: "z" }) === false);
+
+  ctx.notify("hello", "info");
+  ctx.setStatus("k", "v");
+  check("notify and setStatus are emitted to the browser", emitted.some((e) => e.method === "notify") && emitted.some((e) => e.method === "setStatus"));
+
+  // TUI-only members must be callable no-ops: an extension calling one must not
+  // crash on "undefined is not a function".
+  let tuiSafe = true;
+  for (const member of ["setFooter", "setHeader", "setWorkingMessage", "onTerminalInput", "setEditorComponent"]) {
+    try {
+      ctx[member](() => {});
+    } catch {
+      tuiSafe = false;
+    }
+  }
+  check("TUI-only extension calls are safe no-ops", tuiSafe);
+  check("the theme returns text unchanged", ctx.theme.fg("accent", "text") === "text");
+}
+
+/** Queue snapshot on (re)attach. The SDK session really does queue a steer and
+ *  emits `queue_update` for it, so this needs no credentials and no stand-in
+ *  process: steer while idle is a genuine queue mutation. pi emits queue_update
+ *  only when the queue changes, so without the snapshot a tab that switches away
+ *  and back keeps an empty dock while the session still holds those messages. */
+async function queueSnapshotChecks() {
+  const port = PORT + 1;
+  const base = `http://127.0.0.1:${port}`;
+  const child = spawn(
+    process.execPath,
+    [path.join(ROOT, "server.js"), "--port", String(port), "--session-dir", FIXTURE_DIR],
+    { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] }
+  );
+  let log = "";
+  child.stdout.on("data", (d) => (log += d));
+  child.stderr.on("data", (d) => (log += d));
+
+  const post = async (pathname, body) =>
+    (await fetch(`${base}${pathname}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })).json();
+  const sessionA = path.join(FIXTURE_DIR, "--queue-ws-a--", "2026-03-01T00-00-00-000Z_qa.jsonl");
+  const sessionB = path.join(FIXTURE_DIR, "--queue-ws-b--", "2026-03-02T00-00-00-000Z_qb.jsonl");
+  // A session's process runs in the cwd its header records, so this fixture's
+  // cwd has to exist — otherwise the fake binary cannot be spawned at all.
+  writeFixture("--queue-ws-a--", path.basename(sessionA), [
+    { type: "session", version: 3, id: "qa", timestamp: "2026-03-01T00:00:00.000Z", cwd: FIXTURE_DIR },
+  ]);
+  writeFixture("--queue-ws-b--", path.basename(sessionB), [
+    { type: "session", version: 3, id: "qb", timestamp: "2026-03-02T00:00:00.000Z", cwd: FIXTURE_DIR },
+  ]);
+  const holdsQueued = (r) => Array.isArray(r?.steering) && r.steering.includes("QUEUED-ONE");
+
+  try {
+    for (let i = 0; i < 100; i++) {
+      try {
+        if ((await fetch(`${base}/api/health`)).ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // One stream for the whole scenario: the server keeps a single live stream
+    // per client id, exactly like the app's one EventSource per tab.
+    const es = await sseClient(`${base}/api/events?client=q1`);
+    await es.waitFor((r) => r?.event === "hello", 3000);
+    await post("/api/open", { client: "q1", sessionFile: sessionA });
+    const steered = await post("/api/cmd", { client: "q1", type: "steer", message: "QUEUED-ONE" });
+    check("steer is accepted as queued", steered?.data?.disposition === "queued", JSON.stringify(steered).slice(0, 160));
+    const before = await es.waitFor(holdsQueued);
+    check("queue_update reaches the attached tab", before.some(holdsQueued), JSON.stringify(before).slice(0, 200));
+
+    // Switch to another session and back. The queue lives in session A's
+    // process; nothing in the switch produces a queue_update, so the re-attach
+    // has to replay the snapshot or the dock comes back empty.
+    await post("/api/open", { client: "q1", sessionFile: sessionB });
+    await post("/api/open", { client: "q1", sessionFile: sessionA });
+    const replay = await es.waitFor(holdsQueued);
+    check("re-attaching a session replays its pending queue", replay.some(holdsQueued), JSON.stringify(replay).slice(0, 200));
+
+    // An EventSource reconnect uses the same client id on a new stream; the
+    // tab missed nothing but must still be told what is pending.
+    es.close();
+    const reconnected = await sseClient(`${base}/api/events?client=q1`);
+    const afterReconnect = await reconnected.waitFor(holdsQueued, 3000);
+    check(
+      "a reconnected event stream replays the pending queue",
+      afterReconnect.some(holdsQueued),
+      JSON.stringify(afterReconnect).slice(0, 200)
+    );
+
+    await post("/api/cmd", { client: "q1", type: "clear_queue" });
+    const cleared = await reconnected.waitFor((r) => Array.isArray(r?.steering) && !r.steering.length, 5000);
+    check("clearing the queue is broadcast", cleared.length > 0, JSON.stringify(cleared).slice(0, 200));
+
+    // Nothing pending: a re-attach must stay silent rather than flash an
+    // empty dock back onto the screen.
+    reconnected.close();
+    const quiet = await sseClient(`${base}/api/events?client=q1`);
+    const snapshots = await quiet.waitFor((r) => Array.isArray(r?.steering), 800);
+    check("an empty queue sends no snapshot", snapshots.length === 0, JSON.stringify(snapshots).slice(0, 200));
+    quiet.close();
+  } finally {
+    child.kill("SIGTERM");
+    if (failures && log.trim()) console.error(`\nqueue-snapshot server log:\n${log.trim()}`);
+  }
+}
+
+try {
+  check("server starts and answers /api/health", await waitForServer());
+
+  const index = await fetch(`${BASE}/`);
+  const html = await index.text();
+  check("GET / returns 200", index.status === 200, `got ${index.status}`);
+  check("page has the app title", html.includes("<title>pi-web</title>"));
+  check("page links the stylesheet", html.includes('href="/style.css"'));
+  check("page loads the frontend script", html.includes('src="/app.js"'));
+
+  for (const asset of ["/style.css", "/app.js", "/favicon.svg"]) {
+    const res = await fetch(`${BASE}${asset}`);
+    check(`GET ${asset} returns 200`, res.status === 200, `got ${res.status}`);
+  }
+
+  // A file:// link used to fall through the inline parser and render as raw
+  // "[text](url)". It is a separate branch because the click cannot navigate:
+  // Chrome refuses to take an http page to a local path, so the handler copies
+  // it. Both halves are pinned here — the parse and the styled outcome.
+  const appJs = await (await fetch(`${BASE}/app.js`)).text();
+  check("app.js parses file: links", appJs.includes('a class="local-link"'));
+  check("app.js turns a local-link click into a copy", appJs.includes('closest("a.local-link")'));
+  const css = await (await fetch(`${BASE}/style.css`)).text();
+  check("style.css gives rendered links a palette color", css.includes(".assistant-text a {"));
+
+  // The Follow-up control is a toggle: a second press removes what the first
+  // press saved. Both halves have to be present — the pressed class the render
+  // sets, the handler that deletes, and the fill that makes "kept" visible.
+  check("app.js renders the Follow-up control as a toggle", appJs.includes('class: `turn-action followup-toggle'));
+  check("app.js un-keeps a follow-up on a second press", appJs.includes("async function unsaveFollowup"));
+  check("style.css paints the pressed Follow-up control", css.includes(".turn-action.kept {"));
+
+  // Leftover background processes show in the composer dock as well as the
+  // resources panel, each row with a Stop. The badge beside the resources icon
+  // is a "go and look" mark: opening the panel clears it, and a process that
+  // starts later raises it again, so it is counted against an acknowledgement
+  // rather than being on whenever the list is non-empty.
+  check("the dock reserves a row container for leftover processes", html.includes('id="process-bar"'));
+  check("app.js renders one dock row per leftover process", appJs.includes("function renderProcessBar"));
+  check("app.js gives each dock row a Stop", appJs.includes('text: "Stop", title: `Stop ${p.pid}'));
+  check("app.js re-renders the dock rows with the status bar", /function renderStatus\(\)[\s\S]{0,400}renderProcessBar\(\)/.test(appJs));
+  check("opening the resources panel acknowledges the badge", /function setResourcesOpen\(open\)[\s\S]{0,900}acknowledgeProcesses\(\)/.test(appJs));
+  check("the badge counts only unacknowledged processes", appJs.includes("n - state.processesAcked"));
+  check("style.css lays the dock rows out as a stack", css.includes("#process-bar {"));
+  check("style.css styles a dock row", css.includes(".proc-row {"));
+
+  const securityHeaders = (await fetch(`${BASE}/`)).headers;
+  check("X-Content-Type-Options: nosniff", securityHeaders.get("x-content-type-options") === "nosniff");
+  check("X-Frame-Options: DENY", securityHeaders.get("x-frame-options") === "DENY");
+  check("Referrer-Policy: no-referrer", securityHeaders.get("referrer-policy") === "no-referrer");
+
+  const config = await (await fetch(`${BASE}/api/config`)).json();
+  check("/api/config reports a cwd", typeof config.cwd === "string" && config.cwd.length > 0);
+  check("/api/config reports the pi binary", typeof config.piBin === "string" && config.piBin.length > 0);
+
+  // The resources panel reads MCP state through `pi mcp list --json`, which pi
+  // can answer with no servers configured, with servers that fail to connect,
+  // or (when pi is missing) not at all. All three are 200s with a servers/errors
+  // pair: a disconnected server is a state to display, not a failed request.
+  const mcpRes = await fetch(`${BASE}/api/mcp`);
+  const mcp = await mcpRes.json().catch(() => ({}));
+  check("/api/mcp answers with a server list", mcpRes.status === 200 && Array.isArray(mcp.servers), `got ${mcpRes.status}`);
+  check("/api/mcp answers with an errors list", Array.isArray(mcp.errors), JSON.stringify(mcp).slice(0, 200));
+
+  // Follow-ups: a summary the user kept, stored under the configured directory
+  // and readable without pi or the session it came from. The write is the real
+  // one — there is no separate fixture path — and the read must not need the
+  // session file to exist.
+  const emptyFollowups = await (await fetch(`${BASE}/api/followups`)).json();
+  check("/api/followups starts empty", Array.isArray(emptyFollowups.followups) && emptyFollowups.followups.length === 0);
+  const followupText = "## Findings\n\nThe module is unused.\n\n| file | note |\n| --- | --- |\n| a.js | dead |\n";
+  const saved = await fetch(`${BASE}/api/followups`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "FollowupTitle", text: followupText, cwd: "/tmp/ws-alpha" }),
+  });
+  const savedBody = await saved.json().catch(() => ({}));
+  check("/api/followups saves a summary", saved.ok && typeof savedBody.followup?.id === "string", JSON.stringify(savedBody).slice(0, 200));
+  const followupId = savedBody.followup?.id;
+  const savedFile = path.join(FOLLOWUP_DIR, `${followupId}.json`);
+  check("a follow-up is one JSON file on disk", fs.existsSync(savedFile), savedFile);
+  const listed = await (await fetch(`${BASE}/api/followups`)).json();
+  check(
+    "/api/followups lists the saved summary with metadata",
+    listed.followups.length === 1 && listed.followups[0].title === "FollowupTitle" && listed.followups[0].chars === followupText.length,
+    JSON.stringify(listed).slice(0, 200)
+  );
+  check(
+    "/api/followups lists metadata without the body",
+    listed.followups[0]?.text === undefined,
+    JSON.stringify(listed.followups[0]).slice(0, 200)
+  );
+  const opened = await (await fetch(`${BASE}/api/followups/${followupId}`)).json();
+  check(
+    "/api/followups returns the stored Markdown",
+    opened.followup?.text === followupText,
+    JSON.stringify(opened).slice(0, 200)
+  );
+  check("/api/followups 404s an unknown id", (await fetch(`${BASE}/api/followups/${"-".repeat(10)}`)).status === 404);
+  // Editing rewrites the same file and leaves everything that places the
+  // follow-up alone, so an edit never reorders the list or loses its session.
+  const editedText = "## Edited\n\nRewritten by hand.\n";
+  const edited = await fetch(`${BASE}/api/followups/${followupId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "EditedTitle", text: editedText }),
+  });
+  const editedBody = await edited.json().catch(() => ({}));
+  check("/api/followups PATCH updates title and text", edited.ok && editedBody.followup?.title === "EditedTitle", JSON.stringify(editedBody).slice(0, 200));
+  const reread = await (await fetch(`${BASE}/api/followups/${followupId}`)).json();
+  check(
+    "/api/followups PATCH persists the new body under the same id",
+    reread.followup?.id === followupId &&
+      reread.followup?.text === editedText &&
+      reread.followup?.cwd === "/tmp/ws-alpha" &&
+      reread.followup?.createdAt === opened.followup?.createdAt,
+    JSON.stringify(reread).slice(0, 200)
+  );
+  const relisted = await (await fetch(`${BASE}/api/followups`)).json();
+  check(
+    "/api/followups lists an edit with its new title and size",
+    relisted.followups.length === 1 && relisted.followups[0].title === "EditedTitle" && relisted.followups[0].chars === editedText.length,
+    JSON.stringify(relisted).slice(0, 200)
+  );
+  check(
+    "/api/followups PATCH rejects an empty body",
+    (await fetch(`${BASE}/api/followups/${followupId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "   " }),
+    })).status === 400
+  );
+  check(
+    "/api/followups PATCH 404s an unknown id",
+    (await fetch(`${BASE}/api/followups/${"-".repeat(10)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "x" }),
+    })).status === 404
+  );
+  const editTraversal = (await fetch(`${BASE}/api/followups/${encodeURIComponent("..%2F..%2Fetc%2Fpasswd")}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "x" }),
+  })).status;
+  check("a follow-up id cannot escape the directory when editing", editTraversal === 404 || editTraversal === 400, `got ${editTraversal}`);
+  check("/api/followups rejects an empty body", (await fetch(`${BASE}/api/followups`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "x", text: "   " }),
+  })).status === 400);
+  const traversal = await fetch(`${BASE}/api/followups/${encodeURIComponent("..%2F..%2Fetc%2Fpasswd")}`);
+  check("a follow-up id cannot escape the follow-up directory", traversal.status === 404 || traversal.status === 400, `got ${traversal.status}`);
+  const removed = await fetch(`${BASE}/api/followups/${followupId}`, { method: "DELETE" });
+  check("/api/followups deletes a summary", removed.ok && !fs.existsSync(savedFile), `got ${removed.status}`);
+  check("deleting a follow-up twice is not an error", (await fetch(`${BASE}/api/followups/${followupId}`, { method: "DELETE" })).ok);
+
+  const sessions = await (await fetch(`${BASE}/api/sessions`)).json();
+  check("/api/sessions returns a list", Array.isArray(sessions.sessions));
+
+  // Cross-session search: every channel (prompt, response, tool request, tool
+  // result) is reachable, the system prompt and thinking blocks are not, and
+  // the route sits behind the same localhost guards as everything else.
+  const search = async (q, extra = "") => (await fetch(`${BASE}/api/search?q=${encodeURIComponent(q)}${extra}`)).json();
+  const both = await search("flibbertigibbet");
+  check("/api/search returns a hits list", Array.isArray(both.hits));
+  check("/api/search reports truncation state", typeof both.truncated === "boolean");
+  check(
+    "/api/search reaches every workspace",
+    new Set(both.hits.map((h) => h.cwd)).size === 2,
+    JSON.stringify(both.hits.map((h) => h.cwd))
+  );
+  const channels = new Set(both.hits.map((h) => h.role));
+  for (const role of ["user", "assistant", "tool", "toolResult"]) {
+    check(`/api/search matches ${role} content`, channels.has(role), [...channels].join(","));
+  }
+  check("/api/search scopes hits to the matching entry", both.hits.every((h) => h.match.toLowerCase() === "flibbertigibbet"));
+  check("/api/search returns a snippet around the match", both.hits.every((h) => h.before != null && h.after != null && h.entryId));
+
+  const toolArg = await search("SEARCHTOOLARG");
+  check("/api/search matches tool-call arguments", toolArg.hits.length > 0 && toolArg.hits.every((h) => h.role === "tool"));
+  const toolOut = await search("SEARCHTOOLOUT");
+  check("/api/search matches tool results", toolOut.hits.length > 0 && toolOut.hits.every((h) => h.role === "toolResult"));
+
+  // Subagent child output is only in details.results[].finalOutput; searching it
+  // must reach the child run even though the tool result text differs.
+  const childOut = await search("SEARCHCHILDOUT");
+  check("/api/search reaches subagent child output", childOut.hits.length === 1, JSON.stringify(childOut.hits.map((h) => h.toolName)));
+  check("/api/search labels the subagent child by agent", childOut.hits[0]?.toolName === "subagent/reviewer", childOut.hits[0]?.toolName);
+  check(
+    "/api/search ignores the system prompt",
+    (await search("SEARCHSYSTEMONLY")).hits.length === 0
+  );
+  check("/api/search ignores thinking blocks", (await search("SEARCHTHINKINGONLY")).hits.length === 0);
+  check(
+    "/api/search requires all terms",
+    (await search("flibbertigibbet widgets")).hits.length === 1,
+    JSON.stringify((await search("flibbertigibbet widgets")).hits.map((h) => h.role))
+  );
+  check("/api/search is case-insensitive", (await search("FLIBBERTIGIBBET")).hits.length === both.hits.length);
+  const emptySearch = await search("");
+  check("/api/search ignores an empty query", Array.isArray(emptySearch.hits) && emptySearch.hits.length === 0);
+
+  // scope=prompts narrows the same index to user prompts: agent-authored
+  // channels (responses, tool requests, tool results, subagent child output)
+  // must disappear, and prompts from every workspace must still be reachable.
+  const promptHits = await search("flibbertigibbet", "&scope=prompts");
+  check(
+    "/api/search scope=prompts returns only user prompts",
+    promptHits.hits.length > 0 && promptHits.hits.every((h) => h.role === "user"),
+    JSON.stringify(promptHits.hits.map((h) => h.role))
+  );
+  check(
+    "/api/search scope=prompts is narrower than the full corpus",
+    promptHits.hits.length < both.hits.length,
+    `${promptHits.hits.length} of ${both.hits.length}`
+  );
+  check(
+    "/api/search scope=prompts reaches prompts in every workspace",
+    new Set([...(await search("flibbertigibbet", "&scope=prompts")).hits, ...(await search("widgets", "&scope=prompts")).hits].map((h) => h.cwd))
+      .size === 2,
+    JSON.stringify(promptHits.hits.map((h) => h.cwd))
+  );
+  for (const [label, q] of [["tool-call arguments", "SEARCHTOOLARG"], ["tool results", "SEARCHTOOLOUT"], ["subagent child output", "SEARCHCHILDOUT"], ["responses", "SEARCHRESPONSEONLY"]]) {
+    check(`/api/search scope=prompts skips ${label}`, (await search(q, "&scope=prompts")).hits.length === 0);
+  }
+  check(
+    "/api/search scope=prompts finds a prompt in the other workspace",
+    (await search("widgets", "&scope=prompts")).hits.some((h) => h.cwd === "/tmp/ws-beta")
+  );
+
+  // scope=summary narrows the same index to the answer each run concluded with:
+  // the last turn of the run, and only when it settled. Answer text from a mid
+  // tool loop (a1), a prompt, a tool request/result and a run cut off by the
+  // user (a5) must all stay out.
+  const summaryHits = await search("SEARCHSUMMARYANSWER", "&scope=summary");
+  check(
+    "/api/search scope=summary finds a settled run's answer",
+    summaryHits.hits.length === 1 && summaryHits.hits[0].role === "assistant",
+    JSON.stringify(summaryHits.hits.map((h) => [h.role, h.before]))
+  );
+  check(
+    "/api/search scope=summary skips answer text from mid tool loop",
+    (await search("exports nothing useful", "&scope=summary")).hits.length === 0
+  );
+  check(
+    "/api/search scope=summary skips an aborted run",
+    (await search("SEARCHABORTEDANSWER", "&scope=summary")).hits.length === 0
+  );
+  check(
+    "/api/search scope=summary finds the summary in every workspace",
+    new Set([...summaryHits.hits, ...(await search("SEARCHRESPONSEONLY", "&scope=summary")).hits].map((h) => h.cwd)).size === 2,
+    JSON.stringify((await search("SEARCHRESPONSEONLY", "&scope=summary")).hits.map((h) => h.cwd))
+  );
+  for (const [label, q] of [["prompts", "unrelated request"], ["tool-call arguments", "SEARCHTOOLARG"], ["tool results", "SEARCHTOOLOUT"], ["subagent child output", "SEARCHCHILDOUT"]]) {
+    check(`/api/search scope=summary skips ${label}`, (await search(q, "&scope=summary")).hits.length === 0);
+  }
+  check("/api/search reports scope=summary truncation state", typeof summaryHits.truncated === "boolean");
+
+  // A skill invocation is pi's expansion of a slash command: the whole SKILL.md
+  // inside pi's <skill> block, then the prompt. The body is instruction text the
+  // agent reads, not something the user wrote, so it must not join the prompt
+  // index — one definition would otherwise match every query, in every session
+  // that ever used that skill, and outrank the prompts that asked for anything.
+  const skillPrompt = await search("SKILLPROMPTTERM", "&scope=prompts");
+  check("/api/search scope=prompts finds the prompt after a skill block", skillPrompt.hits.length === 1);
+  check(
+    "/api/search skips a skill body in the prompt index",
+    (await search("SKILLBODYONLY", "&scope=prompts")).hits.length === 0
+  );
+  check(
+    "/api/search names the skill in a prompt snippet instead of the raw tag",
+    !skillPrompt.hits[0]?.before.includes("<skill name=") && skillPrompt.hits[0]?.before.includes("review-helper"),
+    JSON.stringify(skillPrompt.hits[0]?.before)
+  );
+  check(
+    "/api/sessions titles a skill session by the skill and the prompt",
+    (() => {
+      const title = sessions.sessions.find((s) => s.cwd === "/tmp/ws-gamma")?.title || "";
+      return title.includes("review-helper") && title.includes("SKILLPROMPTTERM") && !title.includes("SKILLBODYONLY");
+    })(),
+    JSON.stringify(sessions.sessions.find((s) => s.cwd === "/tmp/ws-gamma")?.title)
+  );
+  const unknownScope = await search("flibbertigibbet", "&scope=bogus");
+  check("/api/search treats an unknown scope as the full corpus", unknownScope.hits.length === both.hits.length);
+
+  // A document the composer attached is quoted into the prompt, so its text is
+  // in the session file. It must not become a prompt: the title and the prompt
+  // scope name the file, the body stays out.
+  const docPrompt = await search("DOCPROMPTTERM", "&scope=prompts");
+  check("/api/search finds the prompt that carried an attachment", docPrompt.hits.length === 1);
+  check(
+    "/api/search skips an attached document's body",
+    (await search("ATTACHEDBODYONLY")).hits.length === 0
+  );
+  check(
+    "/api/search names the attached file in the prompt snippet",
+    !`${docPrompt.hits[0]?.before}${docPrompt.hits[0]?.after}`.includes("<attached-file") &&
+      `${docPrompt.hits[0]?.before}${docPrompt.hits[0]?.after}`.includes("quarterly"),
+    JSON.stringify([docPrompt.hits[0]?.before, docPrompt.hits[0]?.after])
+  );
+  check(
+    "/api/sessions titles an attachment session by the prompt and the file name",
+    (() => {
+      const title = sessions.sessions.find((s) => s.cwd === "/tmp/ws-delta")?.title || "";
+      return title.includes("DOCPROMPTTERM") && title.includes("quarterly & report.pdf") && !title.includes("ATTACHEDBODYONLY");
+    })(),
+    JSON.stringify(sessions.sessions.find((s) => s.cwd === "/tmp/ws-delta")?.title)
+  );
+
+  const searchCrossOrigin = await fetch(`${BASE}/api/search?q=flibbertigibbet`, {
+    headers: { Origin: "https://evil.example.com" },
+  });
+  check("cross-origin search is rejected", searchCrossOrigin.status === 403, `got ${searchCrossOrigin.status}`);
+
+  const browse = await (await fetch(`${BASE}/api/browse?path=${encodeURIComponent(ROOT)}`)).json();
+  check("/api/browse lists directories", Array.isArray(browse.dirs) && browse.dirs.includes("public"));
+
+  // Guards: a foreign Host (DNS rebinding) and a foreign Origin (CSRF) must fail.
+  // `fetch` refuses to override Host, so the Host case needs a raw request.
+  const badHostStatus = await rawRequestStatus("/", { Host: "evil.example.com" });
+  check("foreign Host is rejected", badHostStatus === 403, `got ${badHostStatus}`);
+
+  const badOrigin = await fetch(`${BASE}/api/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "https://evil.example.com" },
+    body: JSON.stringify({ client: "smoke" }),
+  });
+  check("cross-origin POST is rejected", badOrigin.status === 403, `got ${badOrigin.status}`);
+
+  // Traversal: encoded and literal attempts must not serve files outside public/.
+  for (const attempt of ["/../package.json", "/..%2fpackage.json", "/%2e%2e/server.js", "/../server.js"]) {
+    const res = await fetch(`${BASE}${attempt}`, { redirect: "manual" });
+    const body = res.status === 200 ? await res.text() : "";
+    check(`traversal ${attempt} is not served`, res.status !== 200 || !body.includes('"name": "pi-web"'), `got ${res.status}`);
+  }
+
+  // A malformed command must be a clean 4xx, never a stack trace or a crash.
+  const badCmd = await fetch(`${BASE}/api/cmd`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client: "smoke" }),
+  });
+  check("command without a type is rejected", badCmd.status === 400, `got ${badCmd.status}`);
+  check("no stack trace leaks in the error body", !(await badCmd.text()).includes("at Object."));
+
+  // /api/image must serve images only: a traversal-ish path, a relative path,
+  // a non-image file and a missing file are all refused.
+  const img = (q) => fetch(`${BASE}/api/image?${q}`);
+  check("/api/image rejects a relative path", (await img("path=package.json")).status === 400);
+  check("/api/image rejects an empty path", (await img("path=")).status === 400);
+  check("/api/image 404s a missing file", (await img(`path=${encodeURIComponent("/tmp/pi-web-nope.png")}`)).status === 404);
+  const notImage = await img(`path=${encodeURIComponent(path.join(ROOT, "server.js"))}`);
+  check("/api/image refuses a non-image file", notImage.status === 415, `got ${notImage.status}`);
+  const realPng = path.join(ROOT, "public", "favicon.svg");
+  check("/api/image refuses SVG (no script-bearing types)", (await img(`path=${encodeURIComponent(realPng)}`)).status === 415);
+
+  // /api/extract turns a dropped document into prompt text. pi's RPC prompt only
+  // takes text and images, so a PDF, .docx or HTML page has to be readable here
+  // or it cannot be attached at all. The three fixtures are written by hand: a
+  // PDF small enough to read in the test, an uncompressed .docx, and a page.
+  const extract = async (name, data) =>
+    fetch(`${BASE}/api/extract`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, data: Buffer.from(data).toString("base64") }),
+    });
+  const textOf = async (res) => {
+    const body = await res.json().catch(() => ({}));
+    return body.text || "";
+  };
+  const pdfRes = await extract("report.pdf", minimalPdf("EXTRACTEDPDFTERM"));
+  const pdfBody = await pdfRes.json().catch(() => ({}));
+  check("/api/extract reads a PDF's text layer", pdfRes.ok && pdfBody.text?.includes("EXTRACTEDPDFTERM"), JSON.stringify(pdfBody).slice(0, 200));
+  check("/api/extract reports a PDF's page count", pdfBody.pages === 1, `pages=${pdfBody.pages}`);
+  const docxRes = await extract("notes.docx", minimalDocx("EXTRACTEDDOCXTERM &amp; 报告"));
+  const docxText = await textOf(docxRes);
+  check("/api/extract reads a .docx", docxRes.ok && docxText.includes("EXTRACTEDDOCXTERM"), docxText.slice(0, 120));
+  check("/api/extract decodes a .docx XML entity", docxText.includes("EXTRACTEDDOCXTERM & 报告"), docxText.slice(0, 120));
+  const htmlRes = await extract("page.html", "<html><body><h1>EXTRACTEDHTMLTERM</h1><p>one</p><ul><li>two</li></ul><script>BADSCRIPT</script></body></html>");
+  const htmlOut = await textOf(htmlRes);
+  check("/api/extract reads an .html file", htmlRes.ok && htmlOut.includes("EXTRACTEDHTMLTERM"), htmlOut.slice(0, 120));
+  check("/api/extract keeps list items as bullets", htmlOut.includes("- two"), JSON.stringify(htmlOut));
+  check("/api/extract drops script bodies", !htmlOut.includes("BADSCRIPT"), JSON.stringify(htmlOut));
+  const txtRes = await extract("notes.md", "# EXTRACTEDMDTERM\n\nbody line");
+  check("/api/extract passes a text file through", txtRes.ok && (await textOf(txtRes)).includes("EXTRACTEDMDTERM"));
+  check("/api/extract refuses an unsupported type", (await extract("archive.zip", "PK\u0003\u0004nothing")).status === 415);
+  check("/api/extract explains a legacy .doc", (await (await extract("old.doc", "text")).json()).error?.includes(".docx"), "");
+  check("/api/extract refuses an empty body", (await fetch(`${BASE}/api/extract`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status === 400);
+  // A file merely named .pdf must fail loudly: sending the model a binary blob
+  // as if it were a document is worse than refusing the attachment.
+  const fakePdf = await extract("fake.pdf", "this is not a pdf at all");
+  check("/api/extract refuses a .pdf with no text layer", fakePdf.status === 415, `got ${fakePdf.status}`);
+  // A container that lies about its contents must be refused, not walked: a
+  // .docx whose document.xml is not deflate data and a zip whose directory
+  // points past the end of the file both have to fail as a 415 with a reason.
+  const corruptDocx = await extract("broken.docx", minimalDocx("x", { corrupt: true }));
+  check("/api/extract refuses a corrupt .docx", corruptDocx.status === 415, `got ${corruptDocx.status}`);
+  const lyingZip = minimalDocx("x");
+  lyingZip.writeUInt32LE(0xffffff00, lyingZip.length - 6); // directory offset past EOF
+  check("/api/extract refuses a .docx with a bad zip directory", (await extract("lying.docx", lyingZip)).status === 415);
+  const extractCrossOrigin = await fetch(`${BASE}/api/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "https://evil.example.com" },
+    body: JSON.stringify({ name: "a.txt", data: "aGk=" }),
+  });
+  check("cross-origin extract is rejected", extractCrossOrigin.status === 403, `got ${extractCrossOrigin.status}`);
+
+
+  // Only run the agent-backed check when pi is actually installed: /api/open
+  // succeeds either way, so ask the agent for its state and treat a 503 as
+  // "no agent here" rather than a pass.
+  const openRes = await fetch(`${BASE}/api/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client: "smoke" }),
+  });
+  check("/api/open attaches a client", openRes.ok, `got ${openRes.status}`);
+
+  const stateRes = await fetch(`${BASE}/api/cmd`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client: "smoke", type: "get_state" }),
+  });
+  if (stateRes.status === 503) {
+    console.log("  skip  agent round-trip (pi not available)");
+  } else {
+    const body = await stateRes.json().catch(() => ({}));
+    check("agent answers get_state", stateRes.ok && body?.success !== false, JSON.stringify(body).slice(0, 200));
+  }
+
+  check("server still alive after the request matrix", (await fetch(`${BASE}/api/health`)).ok);
+
+  // A new session must land in pi's per-cwd directory
+  // (`<sessionDir>/--<encoded-cwd>--/`), not directly under the session root.
+  // Writing it at the root makes the file unfindable by cwd and hands the
+  // browser a path that a later open cannot resolve.
+  {
+    const openRes = await fetch(`${BASE}/api/open`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "cwdcheck", cwd: FIXTURE_DIR }),
+    });
+    const opened = await openRes.json();
+    await fetch(`${BASE}/api/cmd`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "cwdcheck", type: "set_session_name", name: "layout-probe" }),
+    });
+    const stateRes = await fetch(`${BASE}/api/cmd`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "cwdcheck", type: "get_state" }),
+    });
+    const state = await stateRes.json();
+    const file = state?.data?.sessionFile || "";
+    const expectedDir = `${FIXTURE_DIR}/--${path.resolve(FIXTURE_DIR).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+    check("a new session opens in the requested cwd", opened?.cwd === path.resolve(FIXTURE_DIR), JSON.stringify(opened).slice(0, 160));
+    check(
+      "a new session is written under the per-cwd session directory",
+      file.startsWith(expectedDir + path.sep),
+      `expected under ${expectedDir}, got ${file || "(none)"}`
+    );
+    // The reported path itself must not be a direct child of the root: that is
+    // the exact shape of the bug, and it holds whatever directory is in use.
+    check(
+      "the session path is not a direct child of the session root",
+      path.dirname(file) !== FIXTURE_DIR,
+      `reported ${file || "(none)"}, which sits directly under ${FIXTURE_DIR}`
+    );
+    check(
+      "no session file is written at the session root",
+      !fs.readdirSync(FIXTURE_DIR, { withFileTypes: true }).some((e) => e.isFile() && e.name.endsWith(".jsonl")),
+      "a .jsonl file appeared directly under the session root"
+    );
+  }
+
+  // pi persists a new session lazily: `sessionFile` is reported before anything
+  // is written. A reload (or a second tab) naming that path must attach to the
+  // live session, not be rejected for a file that does not exist yet.
+  {
+    await fetch(`${BASE}/api/open`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "lazy", cwd: FIXTURE_DIR }),
+    });
+    const stateRes = await fetch(`${BASE}/api/cmd`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "lazy", type: "get_state" }),
+    });
+    const state = await stateRes.json();
+    const lazyFile = state?.data?.sessionFile || "";
+    check("a new session reports a path before writing it", Boolean(lazyFile) && !fs.existsSync(lazyFile), `file ${lazyFile} (exists: ${fs.existsSync(lazyFile)})`);
+
+    const reopen = await fetch(`${BASE}/api/open`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "lazy2", sessionFile: lazyFile }),
+    });
+    const reopened = await reopen.json().catch(() => ({}));
+    check("a reload attaches to a session whose file is not written yet", reopen.status === 200, `status ${reopen.status} ${JSON.stringify(reopened).slice(0, 160)}`);
+    check("the reload reuses the live session, not a duplicate", reopened?.sessionId === state?.data?.sessionId, `${reopened?.sessionId} vs ${state?.data?.sessionId}`);
+  }
+
+  // A session path that no longer exists must be refused, not silently turned
+  // into a new conversation that overwrites it.
+  {
+    const gone = path.join(FIXTURE_DIR, "--tmp-ws-alpha--", "2099-01-01T00-00-00-000Z_gone.jsonl");
+    const res = await fetch(`${BASE}/api/open`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "missing", sessionFile: gone }),
+    });
+    const body = await res.json().catch(() => ({}));
+    // pi opens an empty session for a path that does not exist yet, because a new
+    // session is persisted lazily. Matching that keeps a reloaded bookmark on the
+    // same (still empty) conversation instead of a dead link.
+    check("a session path with no file opens an empty session", res.status === 200 && body?.ok === true, `status ${res.status} ${JSON.stringify(body).slice(0, 160)}`);
+    check("a missing session file is left to be written by pi", !fs.existsSync(gone));
+    // The path in the URL must stay the session's own path, or the next reload
+    // lands on a different (also empty) conversation and the bookmark never sticks.
+    check(
+      "a session opened from a path keeps that path",
+      body?.sessionFile === gone,
+      `reported ${body?.sessionFile}, expected ${gone}`
+    );
+    // And the pieces that make a reload work: the same path opened twice is the
+    // same session, not a second empty one.
+    const again = await (
+      await fetch(`${BASE}/api/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client: "missing2", sessionFile: gone }),
+      })
+    ).json();
+    check("opening the same path twice reuses the session", again?.sessionId === body?.sessionId, `${again?.sessionId} vs ${body?.sessionId}`);
+  }
+
+  // Static assets must revalidate: a conditional request for an unchanged file
+  // has to be a bodyless 304, otherwise every reload re-downloads app.js.
+  const asset = await fetch(`${BASE}/app.js`);
+  const etag = asset.headers.get("etag");
+  await asset.text();
+  check("static assets carry an ETag", !!etag, `etag=${etag}`);
+  const revalidated = await fetch(`${BASE}/app.js`, { headers: { "If-None-Match": etag } });
+  check("unchanged asset revalidates as 304", revalidated.status === 304, `got ${revalidated.status}`);
+  const stale = await fetch(`${BASE}/app.js`, { headers: { "If-None-Match": '"0-0"' } });
+  check("stale ETag still returns the file", stale.status === 200 && (await stale.text()).length > 0, `got ${stale.status}`);
+
+  // A closed event stream must not leak its client entry: every page load used
+  // to leave one behind, and every broadcast walked all of them. Each stream
+  // here reads its first chunk, because a request aborted before the response
+  // headers never registers a client at all. The grace period keeps a
+  // reconnecting EventSource attached, so this asserts the map stays bounded
+  // rather than that it drops to zero immediately.
+  const openThenClose = async (id) => {
+    const ctl = new AbortController();
+    const res = await fetch(`${BASE}/api/events?client=${id}`, { signal: ctl.signal });
+    await res.body.getReader().read();
+    ctl.abort();
+  };
+  for (let i = 0; i < 260; i++) await openThenClose(`churn-${i}`).catch(() => {});
+  await new Promise((r) => setTimeout(r, 200));
+  const healthAfter = await (await fetch(`${BASE}/api/health`)).json();
+  check(
+    "closed event streams do not accumulate past the cap",
+    healthAfter.clients <= 200,
+    `clients=${healthAfter.clients} after 260 closed streams`
+  );
+
+  // Queue snapshot on re-attach: pi emits queue_update only when the queue
+  // changes, so a tab that switches away and back must be told what its session
+  // still holds — otherwise the dock looks empty while messages are pending.
+  await queueSnapshotChecks();
+  await backgroundProcessChecks();
+  // Extension dialogs resolve through the in-process UI context, which the RPC
+  // bridge used to provide by writing to stdout. No server or credentials needed.
+  await extensionUiChecks();
+} finally {
+  stopServer();
+  fs.rmSync(FIXTURE_DIR, { recursive: true, force: true });
+  fs.rmSync(FOLLOWUP_DIR, { recursive: true, force: true });
+}
+
+if (failures) {
+  console.error(`\n${failures} check(s) failed`);
+  if (serverLog.trim()) console.error(`\nserver log:\n${serverLog.trim()}`);
+  process.exit(1);
+}
+console.log("\nall smoke checks passed");

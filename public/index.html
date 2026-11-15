@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pi-web</title>
+  <meta name="description" content="A local web UI for the pi coding agent: streamed transcripts, session history, and a full inspector for every LLM and tool call.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#e8f0fa">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script>
+    // apply the saved palette before first paint to avoid a flash. Unknown
+    // values (a retired palette, or the older "light"/"dark") resolve to one
+    // of the current moods.
+    (function () {
+      var known = ["mono", "sky", "grove", "ember", "elegant", "night"];
+      var saved = localStorage.getItem("piweb-theme");
+      document.documentElement.dataset.theme = known.indexOf(saved) >= 0
+        ? saved
+        : saved === "dark" ? "night" : "sky";
+    })();
+  </script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <span class="logo">
+          <!-- the mark is drawn in currentColor so it follows the palette: a
+               terminal caret in a rounded square, no gradient, no glow -->
+          <span class="logo-mark">
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              <rect x="1.5" y="1.5" width="29" height="29" rx="8.5" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M10 11.5l4.5 4.5-4.5 4.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17.5 20.5h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span class="logo-text">Pi<span class="logo-dim">web</span></span>
+        </span>
+        <span class="sidebar-actions">
+          <button id="btn-search" class="icon-btn" title="Search all sessions (Ctrl/Cmd+K)" aria-label="Search all sessions"
+                  aria-haspopup="dialog" aria-expanded="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          </button>
+          <button id="btn-workspaces" class="icon-btn" title="Switch workspace" aria-label="Switch workspace">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          </button>
+          <button id="btn-new-session" class="icon-btn" title="New session in this workspace" aria-label="New session">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 8v8M8 12h8"/></svg>
+          </button>
+          <button id="btn-sidebar-collapse" class="icon-btn" title="Collapse sidebar" aria-label="Collapse sidebar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path d="M15 10l-2 2 2 2"/></svg>
+          </button>
+        </span>
+      </div>
+      <div id="sidebar-tabs" class="sidebar-tabs" role="tablist" aria-label="Session views">
+        <button id="tab-workspaces" role="tab" aria-selected="false" title="Workspaces">Workspaces</button>
+        <button id="tab-recent" role="tab" aria-selected="true" title="Recent">Recent</button>
+        <button id="tab-favorites" role="tab" aria-selected="false" title="Favorites">Favorites</button>
+        <button id="tab-followups" role="tab" aria-selected="false" title="Follow-ups">Follow-ups</button>
+      </div>
+      <div id="sidebar-crumb" class="sidebar-crumb hidden">
+        <button id="btn-back-workspaces" class="icon-btn" title="All workspaces" aria-label="All workspaces">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <span id="crumb-name"></span>
+      </div>
+      <input id="session-filter" type="search" placeholder="Filter sessions...">
+      <div id="session-list" class="session-list"></div>
+      <div id="sidebar-foot">
+        <div id="pi-status" class="pi-status">connecting…</div>
+        <button id="btn-resources" class="ghost icon-btn" title="Models, skills, MCP servers and background processes"
+                aria-label="Models, skills, MCP servers and background processes" aria-haspopup="dialog" aria-expanded="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <!-- count of a session's leftover background processes; hidden at zero,
+               so a quiet session keeps a quiet sidebar -->
+          <span id="resources-badge" class="icon-badge hidden"></span>
+        </button>
+      </div>
+    </aside>
+
+    <div id="resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" title="Drag to resize · double-click to reset"></div>
+
+    <main id="main">
+      <header id="topbar">
+        <div class="topbar-left">
+          <button id="btn-sidebar-expand" class="ghost icon-btn hidden" title="Show sidebar" aria-label="Show sidebar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+          </button>
+          <span id="session-name">—</span>
+          <button id="btn-session-info" class="ghost icon-btn" title="Session details" aria-label="Session details"
+                  aria-haspopup="dialog" aria-expanded="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5"/><path d="M12 8h.01"/></svg>
+          </button>
+          <button id="btn-favorite" class="ghost icon-btn" title="Add to Favorites" aria-label="Add to Favorites"
+                  aria-pressed="false"></button>
+          <div id="session-info-pop" class="popover hidden" role="dialog" aria-label="Session details"></div>
+        </div>
+        <div class="topbar-right">
+          <div class="picker">
+            <button id="model-picker-btn" class="picker-btn hidden" title="Model"
+                    aria-haspopup="listbox" aria-expanded="false"><span class="picker-label">model</span></button>
+            <div id="model-menu" class="picker-menu hidden" role="listbox" aria-label="Model"></div>
+          </div>
+          <div class="picker">
+            <button id="thinking-picker-btn" class="picker-btn hidden" title="Thinking level"
+                    aria-haspopup="listbox" aria-expanded="false"><span class="picker-label">think</span></button>
+            <div id="thinking-menu" class="picker-menu hidden" role="listbox" aria-label="Thinking level"></div>
+          </div>
+          <span id="context-usage" class="badge" title="Context window usage">—</span>
+          <span id="session-cost" class="badge" title="Session cost / tokens">—</span>
+          <span class="topbar-sep" aria-hidden="true"></span>
+          <button id="btn-prompt-list" class="ghost icon-btn" title="User prompts in this session" aria-label="User prompts"
+                  aria-haspopup="dialog" aria-expanded="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+          </button>
+          <div id="prompt-list-pop" class="hidden" role="dialog" aria-label="User prompts"></div>
+          <div class="picker">
+            <button id="btn-theme" class="ghost icon-btn" title="Theme" aria-label="Theme"
+                    aria-haspopup="listbox" aria-expanded="false"></button>
+            <div id="theme-menu" class="picker-menu hidden" role="listbox" aria-label="Theme"></div>
+          </div>
+        </div>
+      </header>
+
+      <div id="transcript-wrap">
+        <div id="transcript" tabindex="0"></div>
+        <button id="btn-jump" class="hidden" title="Jump to latest">↓ latest</button>
+      </div>
+
+      <!-- a saved follow-up: rendered from its own JSON file, with no pi
+           process and no session replay behind it -->
+      <section id="followup-view" class="hidden" aria-label="Follow-up"></section>
+
+      <!-- status and queued messages live directly above the input, where the
+           eye already is; in the header they were easy to miss -->
+      <div id="composer-dock">
+        <div id="status-bar" class="hidden">
+          <span id="status-text"></span>
+          <span class="spacer"></span>
+          <button id="btn-abort" class="danger hidden" title="Abort (Esc)">Stop</button>
+        </div>
+        <!-- leftovers from this session's bash calls: the same list the
+             resources panel holds, where the reader is already looking -->
+        <div id="process-bar" class="hidden"></div>
+        <div id="queue-bar" class="hidden"></div>
+        <div id="composer">
+          <div id="attachments" class="attachments hidden"></div>
+          <textarea id="input" rows="1" placeholder="Message pi…  (type / for commands & skills, attach or drop files, Enter to send, Shift+Enter for newline)"></textarea>
+          <div class="composer-row">
+            <button id="btn-attach" class="icon-btn" title="Attach files (images, PDF, Word, HTML, text)" aria-label="Attach files">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.6-2.6l7.6-7.6"/></svg>
+            </button>
+            <input id="file-input" type="file" accept="image/*,.pdf,.docx,.html,.htm,.txt,.md,.markdown,.csv,.json,.log,.yaml,.yml" multiple class="hidden" aria-hidden="true" tabindex="-1">
+            <span class="hint dim" id="composer-hint"></span>
+            <span class="spacer"></span>
+            <button id="btn-send">Send</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="modal-overlay" class="hidden">
+    <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-head">
+        <span id="modal-title">Details</span>
+        <span class="spacer"></span>
+        <button id="modal-raw" class="ghost hidden" title="Toggle raw JSON">Raw JSON</button>
+        <button id="modal-copy" class="ghost" title="Copy JSON">Copy</button>
+        <button id="modal-close" class="ghost" title="Close (Esc)">✕</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="image-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Enlarged image">
+    <img id="image-overlay-img" alt="" />
+  </div>
+
+  <div id="dialog-overlay" class="hidden">
+    <div id="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+      <div id="dialog-title"></div>
+      <div id="dialog-body"></div>
+      <div class="dialog-actions">
+        <span class="dim" id="dialog-hint"></span>
+        <span class="spacer"></span>
+        <button id="dialog-cancel" class="ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ws-overlay" class="hidden">
+    <div id="ws-dialog" role="dialog" aria-modal="true" aria-label="Choose workspace directory">
+      <div class="ws-dialog-head">Choose a workspace directory</div>
+      <div class="ws-path-row">
+        <button id="ws-up" class="icon-btn" title="Up one level" aria-label="Up one level">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+        <code id="ws-path" title=""></code>
+      </div>
+      <div id="ws-dirs" class="ws-dirs"></div>
+      <div class="ws-dialog-foot">
+        <button id="ws-home" class="ghost">Home</button>
+        <span class="spacer"></span>
+        <button id="ws-cancel" class="ghost">Cancel</button>
+        <button id="ws-choose">Use this directory</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="search-overlay" class="hidden">
+    <div id="search-dialog" role="dialog" aria-modal="true" aria-labelledby="search-title">
+      <div class="search-head">
+        <span id="search-title">Search all sessions</span>
+        <div id="search-tabs" class="search-tabs" role="tablist" aria-label="Search scope">
+          <button id="search-tab-prompts" class="active" role="tab" aria-selected="true">Prompts</button>
+          <button id="search-tab-summary" role="tab" aria-selected="false">Summary</button>
+          <button id="search-tab-all" role="tab" aria-selected="false">Everything</button>
+        </div>
+        <span class="spacer"></span>
+        <span class="dim" id="search-count"></span>
+        <button id="search-close" class="ghost" title="Close (Esc)">✕</button>
+      </div>
+      <div class="search-input-row">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="search-input" type="search" placeholder="Search prompts in every workspace…"
+               autocomplete="off" spellcheck="false" aria-label="Search all sessions"
+               role="combobox" aria-expanded="true" aria-controls="search-results" aria-autocomplete="list">
+      </div>
+      <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
+      <div class="search-foot">
+        <span class="dim">All terms must match · newest first</span>
+        <span class="spacer"></span>
+        <span class="dim search-keys"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- resource inspector: centered and modal, because a sidebar-anchored
+       popover could only be as wide as the sidebar and every row ended as an
+       ellipsis. It shows the same three read-only lists as before. -->
+  <div id="resources-overlay" class="hidden">
+    <div id="resources-dialog" role="dialog" aria-modal="true" aria-labelledby="res-title">
+      <div class="res-head">
+        <span id="res-title">Models, skills, MCP servers and processes</span>
+        <div id="res-tabs" class="res-tabs" role="tablist" aria-label="What to list">
+          <button id="res-tab-models" class="active" role="tab" aria-selected="true">Models</button>
+          <button id="res-tab-skills" role="tab" aria-selected="false">Skills</button>
+          <button id="res-tab-mcps" role="tab" aria-selected="false">MCPs</button>
+          <button id="res-tab-processes" role="tab" aria-selected="false">Processes</button>
+        </div>
+        <span class="spacer"></span>
+        <span class="dim" id="res-count"></span>
+        <button id="res-close" class="ghost" title="Close (Esc)">✕</button>
+      </div>
+      <div id="res-body" class="res-body"></div>
+      <div class="res-foot">
+        <span class="dim" id="res-hint"></span>
+        <span class="spacer"></span>
+        <span class="dim search-keys"><kbd>Esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+  <noscript>pi-web needs JavaScript enabled to talk to the local agent process.</noscript>
+
+  <script src="/app.js"></script>
+</body>
+</html>
