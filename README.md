@@ -7,8 +7,8 @@ instead of a `pi --mode rpc` subprocess.
 bad at: browsing every past session across every project, and inspecting exactly what the model sent
 and received — request arguments, live tool output, full responses, token usage and cost.
 
-The frontend is the same one pi-web uses: three static files, no framework, no build step. What
-changed is the backend, and one number in particular:
+The frontend is the same one pi-web uses: three static files, no framework, no build step —
+*currently*. What changed is the backend, and one number in particular:
 
 | | `pi --mode rpc` (one process per session) | pi-ui (in-process SDK) |
 | --- | --- | --- |
@@ -20,6 +20,8 @@ changed is the backend, and one number in particular:
 ## Contents
 
 - [Why it is fast](#why-it-is-fast)
+  - [Rendering a stream in O(n), not O(n²)](#rendering-a-stream-in-on-not-on²)
+  - [Highlighting](#highlighting)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
@@ -82,6 +84,32 @@ debounced 120 ms), a live session file re-parsed whole on every 8 s poll (now to
 bytes appended since the last read), and `ps`/`lsof` run synchronously on every bash call (now async,
 and a leftover's liveness is a signal-0 rather than a process table scan).
 
+### Highlighting
+
+Code fences are syntax-highlighted with Prism, and the cost is paid once per block, at
+`message_end` — never per delta, for the same reason the Markdown is not re-parsed per delta.
+
+Prism is **vendored** into `public/vendor/prism.min.js` (34 KB raw, 12.5 KB gzipped) rather than
+declared as a dependency, because the repo has to run from a bare checkout: `node server.js` and
+`npm test` must not require `npm install`. `scripts/vendor-prism.sh` regenerates it. The bundle
+carries core plus the grammars the transcripts actually use, counted across every saved session:
+bash 169, json 86, markdown 45, js 14, typescript 3, css 3, python 3 (plus markup and yaml, which
+the HTML and front-matter blocks need).
+
+Measured on the 53 KB README, rendered as a transcript:
+
+```text
+plain (before)          0.66 ms median, 0.99 ms p95
+highlighted (after)     0.87 ms median, 1.17 ms p95
+```
+
+So highlighting is ~0.2 ms on a 53 KB turn. It is bounded rather than unbounded: Prism runs at
+~2.7 MB/s, so a block over `MAX_HIGHLIGHT_CHARS` (200 KB) renders plain — measured, a 200 KB block
+costs 0.3 ms plain versus ~78 ms highlighted. The other three rules are that a fence with no language
+tag stays plain (guessing colours identifiers as strings and reads worse than not highlighting), a
+grammar that throws falls back to the escaped text, and Prism's own `highlightAll` is disabled via
+`data-manual` so a transcript render never triggers a page-wide rescan.
+
 ## Requirements
 
 - Node.js **18 or newer** (ESM and `node:` imports only).
@@ -91,7 +119,8 @@ and a leftover's liveness is a signal-0 rather than a process table scan).
 - `npm install @earendil-works/pi-coding-agent` also works and takes precedence, for a pinned or
   project-local SDK.
 
-Nothing else is needed to run it — the frontend has no dependencies and no build step.
+Nothing else is needed to run it — the frontend has no dependencies and no build step today, so a
+bare checkout runs with `node server.js`.
 
 ## Quick start
 
@@ -120,6 +149,7 @@ node server.js --help                    # every option
 | `sdk/images.js` | Image offload: placeholders in, base64 kept server-side |
 | `sdk/ui-context.js` | The `ExtensionUIContext` the RPC bridge used to provide over stdout |
 | `public/index.html`, `public/app.js`, `public/style.css` | The frontend shell, state and rendering, and the design tokens |
+| `public/vendor/prism.min.js` | Syntax highlighting grammars, vendored (see [Highlighting](#highlighting)) |
 
 The HTTP surface is unchanged from pi-web, so the browser never talks to the agent directly and every
 route below behaves as it did.
@@ -284,12 +314,13 @@ those calls are verified instead of guessed from JS source. Turning it on found 
 declared, and a `#resolveTarget` call omitting an optional field — none of which `node --check`
 (a pure syntax check) can see.
 
-TypeScript was *not* adopted as the source language. Types do not survive to runtime, so a `.ts`
-rewrite would not make anything faster (measured: `server.ts` via Node's type stripping boots in
-361–372 ms versus 337–358 ms for `server.js`), and it would cost a build step plus `enum`/
-parameter-property restrictions under `--experimental-strip-types`. `test/smoke.js` is deliberately
-out of scope: it reads `await res.json()` ~120 times, which is `unknown`, and annotating those sites
-would add casts without adding safety.
+TypeScript was *not* adopted as the source language, for two measured reasons: types do not survive
+to runtime, so a `.ts` rewrite would not make anything faster (`server.ts` via Node's type stripping
+boots in 361–372 ms versus 337–358 ms for `server.js`), and the current toolchain requires no build
+at all. This is a trade made from measurements, not a prohibition: if a build step lands for another
+reason and types then pay for themselves, the source language can be revisited. `test/smoke.js` is
+deliberately out of scope: it reads `await res.json()` ~120 times, which is `unknown`, and annotating
+those sites would add casts without adding safety.
 
 ## Limitations
 

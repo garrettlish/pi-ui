@@ -52,22 +52,33 @@ node server.js        # the UI (defaults to 127.0.0.1:3220)
 npm run check         # syntax check: server, frontend, SDK modules, tests
 npm run typecheck     # checkJs over server + SDK + frontend (needs `npm install`)
 npm test              # end-to-end smoke test on its own port
+scripts/vendor-prism.sh  # regenerate public/vendor/prism.min.js (only when adding a grammar)
 ```
 
 ## Conventions this repo holds itself to
 
-- **No build step, no runtime dependencies.** The source is JavaScript and stays that way; `node
-  server.js` runs the files directly. Type checking is `checkJs` + `noEmit` (`jsconfig.json`,
-  `jsconfig.web.json`) — it catches API misuse, it does not compile anything. Do not introduce a
-  bundler or a transpile step.
-- **Do not convert the source to TypeScript.** It buys nothing at runtime (measured: a `.ts` server
-  boots ~20 ms *slower* under Node's type stripping, because types are erased and nothing else
-  changes) and costs the no-build-step property plus Node 18 compatibility. Add JSDoc where a type
-  helps; the typecheck already reads it.
+- **Build steps and dependencies are allowed when they earn their place.** The goal is a
+  professional, fast, well-designed UI; a bundler, a framework or an npm dependency is a legitimate
+  means to that end, not a violation. What the repo will not do is pay for tooling that buys nothing:
+  every added tool must come with a reason (load time, bundle size, or a bug class it prevents), and
+  `node server.js` should stay a one-command way to run the UI — if a build ever becomes mandatory,
+  say so here and in the README so nobody ends up serving stale assets.
+- **Vendored code stays vendored, and stays marked.** `public/vendor/prism.min.js` is third-party
+  code checked in on purpose: syntax highlighting must not be the one thing a bare checkout cannot
+  run. Do not add an npm dependency that supersedes it, and do not hand-edit it — regenerate with
+  `scripts/vendor-prism.sh`, which rewrites the file and its license from the upstream package. Any
+  other vendored file follows the same rule: a header naming version and license, and a script that
+  reproduces it.
+- **The source is JavaScript today, by measurement rather than dogma.** `node server.js` runs the
+  files directly and type checking is `checkJs` + `noEmit` (`jsconfig.json`, `jsconfig.web.json`).
+  A `.ts` source was measured ~20 ms *slower* to boot under Node's type stripping (types are erased,
+  nothing else changes), which is why TypeScript is not the source language — not because transpiling
+  is forbidden. If a build step lands anyway and types then pay for themselves, that trade can be
+  revisited. Until then, add JSDoc where a type helps; the typecheck already reads it.
 - **Performance claims need a measurement.** This repo's README publishes numbers. If you change a
-  hot path, measure before and after on a real session and state both — do not assert "faster".
-  Streaming, session listing and process tracking all have benchmarks in their history; a plausible
-  argument is not a substitute for the number.
+  hot path — or add a dependency to one — measure before and after on a real session and state both;
+  do not assert "faster". Streaming, session listing and process tracking all have benchmarks in
+  their history; a plausible argument is not a substitute for the number.
 - **Streaming renders text, not Markdown.** A `text_delta` appends to one text node
   (`applyStreamDelta`); Markdown is parsed once at `message_end`. Re-parsing per delta is quadratic
   and also re-flows the page under the reader, because half-written Markdown is not Markdown.

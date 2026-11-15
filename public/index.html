@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>pi-web</title>
+  <title>pi-ui</title>
   <meta name="description" content="A local web UI for the pi coding agent: streamed transcripts, session history, and a full inspector for every LLM and tool call.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#e8f0fa">
@@ -12,13 +12,20 @@
   <script>
     // apply the saved palette before first paint to avoid a flash. Unknown
     // values (a retired palette, or the older "light"/"dark") resolve to one
-    // of the current moods.
+    // of the current moods. A first visit has nothing saved, so it follows the
+    // OS preference: forcing the light default on a dark desktop flashes a
+    // white page before style.css runs.
     (function () {
       var known = ["mono", "sky", "grove", "ember", "elegant", "night"];
       var saved = localStorage.getItem("piweb-theme");
-      document.documentElement.dataset.theme = known.indexOf(saved) >= 0
-        ? saved
-        : saved === "dark" ? "night" : "sky";
+      var theme;
+      if (known.indexOf(saved) >= 0) theme = saved;
+      // retired values from older builds still have to land somewhere sane
+      else if (saved === "dark") theme = "night";
+      else if (saved === "light") theme = "sky";
+      else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) theme = "night";
+      else theme = "sky";
+      document.documentElement.dataset.theme = theme;
     })();
   </script>
 </head>
@@ -36,7 +43,7 @@
               <path d="M17.5 20.5h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
             </svg>
           </span>
-          <span class="logo-text">Pi<span class="logo-dim">web</span></span>
+          <span class="logo-text">Pi<span class="logo-dim">ui</span></span>
         </span>
         <span class="sidebar-actions">
           <button id="btn-search" class="icon-btn" title="Search all sessions (Ctrl/Cmd+K)" aria-label="Search all sessions"
@@ -277,8 +284,15 @@
   </div>
 
   <div id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
-  <noscript>pi-web needs JavaScript enabled to talk to the local agent process.</noscript>
+  <noscript>pi-ui needs JavaScript enabled to talk to the local agent process.</noscript>
 
+  <!-- Syntax highlighting, before app.js so `window.Prism` exists by the time the
+       first transcript renders. 34 KB raw / 12 KB gzipped, vendored rather than
+       an npm dependency so a bare checkout still runs (see public/vendor/prism.min.js).
+       Prism's own auto-highlight is off: app.js highlights explicitly, because
+       every transcript render replaces nodes and would otherwise re-scan the
+       whole page. -->
+  <script src="/vendor/prism.min.js" data-manual></script>
   <script src="/app.js"></script>
 </body>
 </html>

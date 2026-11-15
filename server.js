@@ -357,7 +357,7 @@ function filterConfiguredModels(models, patterns) {
 //  - A process that finishes inside the call window looks like any other
 //    short-lived command, so only leftovers are reported.
 //  - Detection needs a call window; a server started before this version of
-//    pi-web was running is not retroactively attributed to a session.
+//    pi-ui was running is not retroactively attributed to a session.
 
 /** One snapshot of every process this user owns, keyed by pid.
  *
@@ -1853,7 +1853,7 @@ function isAllowedRequest(req) {
 
 const server = http.createServer(async (req, res) => {
   if (!ALLOW_REMOTE && !isAllowedRequest(req)) {
-    sendJson(res, 403, { error: "pi-web only accepts requests from localhost — see README: Remote access" });
+    sendJson(res, 403, { error: "pi-ui only accepts requests from localhost — see README: Remote access" });
     return;
   }
   // Defense in depth for every response: no MIME sniffing, no referrer leaks to
@@ -2235,7 +2235,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         sessions: sessionHost ? sessionHost.sessions.size : 0,
-        workspaces: sessionHost ? sessionHost.services.size : 0,
+        workspaces: sessionHost ? sessionHost.workspaces.size : 0,
         clients: clients.size,
       });
       return;
@@ -2376,8 +2376,8 @@ process.on("SIGTERM", shutdown);
 
 server.on("error", (/** @type {NodeJS.ErrnoException} */ err) => {
   if (err.code === "EADDRINUSE") {
-    console.error(`[pi-web] port ${PORT} is already in use — is another pi-web already running?`);
-    console.error(`[pi-web] try: lsof -ti :${PORT} | xargs kill   (then rerun)`);
+    console.error(`[pi-ui] port ${PORT} is already in use — is another pi-ui already running?`);
+    console.error(`[pi-ui] try: lsof -ti :${PORT} | xargs kill   (then rerun)`);
     process.exit(1);
   }
   throw err;
@@ -2385,10 +2385,12 @@ server.on("error", (/** @type {NodeJS.ErrnoException} */ err) => {
 /**
  * Boot.
  *
- * The SDK import (~250-500 ms) and the default workspace's services (~0.8 s,
- * extensions + skills + MCP) happen before the port opens, so the first tab that
- * connects finds a ready host instead of paying that cost inside `/api/open`.
- * Both are one-time: every later session in that workspace is ~46 ms.
+ * The SDK import (~250-500 ms) and the default workspace's shared parts (~0.8 s,
+ * the model runtime plus settings) happen before the port opens, so the first tab
+ * that connects finds a ready host instead of paying that cost inside `/api/open`.
+ * Both are one-time; a session's own extensions and skills are rebuilt per
+ * session (~200 ms) because sharing them is what let one session's dispose
+ * invalidate another's extension context — see `SessionHost.workspaceFor`.
  */
 async function boot() {
   const { mod, root, version } = await loadSdk(SDK_PATH);
@@ -2400,7 +2402,7 @@ async function boot() {
   // the operator but must not stop the server: another workspace may still work,
   // and the error resurfaces per-open instead.
   void sessionHost
-    .servicesFor(CWD)
+    .workspaceFor(CWD)
     .then(() => console.log(`[pi-ui] workspace ready: ${CWD}`))
     .catch((err) => console.error(`[pi-ui] workspace warm-up failed for ${CWD}: ${err.message}`));
 

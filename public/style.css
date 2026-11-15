@@ -1112,6 +1112,53 @@ details.skill-def[open] > summary { margin-bottom: 6px; }
 .assistant-text h3:first-child { margin-top: 0; }
 .assistant-text ul, .assistant-text ol { margin: 4px 0 8px; padding-left: 22px; }
 .assistant-text li { margin: 2px 0; }
+/* a nested list belongs to its parent item: without the tight top margin the
+   sub-items float away from the line that introduces them */
+.assistant-text li > ul, .assistant-text li > ol { margin: 2px 0 2px; padding-left: 20px; }
+
+/* Syntax highlighting (Prism, vendored in public/vendor/prism.min.js).
+   Four inks only, taken from the palette rather than a separate rainbow, and
+   measured against the code fill in every palette — comment 5.0:1, keyword
+   5.5:1, string 5.6:1, number 6.9:1 at worst, and 6.7/6.8/9.1/9.9 in night.
+
+   Function names deliberately share the keyword color instead of taking their
+   own hue: the obvious candidate was --danger, which painted every bash command
+   (`ps`, `kill`) error-red. Status tokens mean status here, so the code palette
+   stays out of them — except for .deleted/.inserted, which literally are a diff. */
+.assistant-text .token.comment,
+.assistant-text .token.prolog,
+.assistant-text .token.doctype,
+.assistant-text .token.cdata { color: var(--text-3); font-style: italic; }
+.assistant-text .token.keyword,
+.assistant-text .token.atrule,
+.assistant-text .token.rule,
+.assistant-text .token.selector { color: var(--accent-text); }
+.assistant-text .token.string,
+.assistant-text .token.char,
+.assistant-text .token.attr-value,
+.assistant-text .token.regex,
+.assistant-text .token.url { color: var(--success); }
+.assistant-text .token.number,
+.assistant-text .token.boolean,
+.assistant-text .token.constant,
+.assistant-text .token.symbol { color: var(--warning); }
+.assistant-text .token.function,
+.assistant-text .token.class-name,
+.assistant-text .token.tag,
+.assistant-text .token.builtin,
+.assistant-text .token.important { color: var(--accent-text); }
+.assistant-text .token.deleted { color: var(--danger); }
+.assistant-text .token.inserted { color: var(--success); }
+.assistant-text .token.property,
+.assistant-text .token.attr-name,
+.assistant-text .token.variable,
+.assistant-text .token.parameter { color: var(--text); }
+/* punctuation, operators and property-access dots are scaffolding, not content:
+   dimming them is what makes highlighted code scan faster than plain text */
+.assistant-text .token.punctuation,
+.assistant-text .token.operator { color: var(--text-2); }
+.assistant-text .token.bold { font-weight: 600; }
+.assistant-text .token.italic { font-style: italic; }
 .assistant-text blockquote {
   margin: 6px 0; padding-left: 12px;
   border-left: 3px solid var(--border-strong); color: var(--text-2);
@@ -1349,6 +1396,10 @@ details.item-thinking[open] > summary { margin-bottom: 4px; }
   flex: none; font-size: 11.5px; color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+/* A call past STALL_AFTER_MS is the one case where the elapsed time is a warning
+   rather than information: the same hue as a failed call, so a stuck command is
+   visible while scanning rather than only by reading the number. */
+.tc-duration.stalled { color: var(--danger); font-weight: 600; }
 .tc-status {
   flex: none; padding: 1px 7px; font-size: 11px; font-weight: 500;
   border-radius: var(--radius-pill);

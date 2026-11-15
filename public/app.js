@@ -1,5 +1,6 @@
-/* pi-web frontend: talks to the local bridge server (server.js) which
- * proxies a `pi --mode rpc` subprocess. No framework, no build step. */
+/* pi-ui frontend: talks to the local server (server.js), which hosts the pi
+ * SDK in-process. No framework, no build step today (see AGENTS.md: a build is
+ * allowed when it earns its place, it is not forbidden). */
 "use strict";
 
 // ---------------------------------------------------------------------------
@@ -266,9 +267,114 @@ function isTableStart(lines, i) {
   return lines[i].includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1]);
 }
 
+/** One contiguous run of list lines, as nested `<ul>`/`<ol>`.
+ *
+ *  Indentation is the only nesting signal Markdown gives, and flattening it
+ *  loses real structure: a transcript's "rule, then its two sub-rules" rendered
+ *  as three sibling bullets reads as three peers. The original flat renderer did
+ *  exactly that for the 22 nested items found across the saved sessions.
+ *
+ *  A run ends at the first non-list line, blank lines included — a looser list
+ *  (blank lines between items) still renders as several lists, which is what it
+ *  did before and keeps this a rendering fix rather than a parser rewrite. */
+function renderList(lines, start) {
+  const items = [];
+  let i = start;
+  while (i < lines.length) {
+    const m = lines[i].match(/^(\s*)([-*]|(\d+)\.)\s+(.*)$/);
+    if (!m) break;
+    items.push({ indent: m[1].length, ordered: m[3] !== undefined, num: m[3], text: m[4] });
+    i++;
+  }
+  const openTag = (item) => {
+    // a list that starts at 3 must keep its numbering: dropping it renumbers the
+    // reader's steps 1,2,3. Only the first item's number can start a list.
+    const startAt = item.ordered && item.num !== "1" ? ` start="${item.num}"` : "";
+    return `<${item.ordered ? "ol" : "ul"}${startAt}><li>`;
+  };
+  const stack = []; // { indent, tag }: the lists currently open, outermost first
+  let html = "";
+  for (const item of items) {
+    const tag = item.ordered ? "ol" : "ul";
+    // dedent: every list opened below this item's indent has to close first
+    while (stack.length && item.indent < stack[stack.length - 1].indent) {
+      html += `</li></${stack.pop().tag}>`;
+    }
+    const top = stack[stack.length - 1];
+    if (!top) {
+      html += openTag(item);
+      stack.push({ indent: item.indent, tag });
+    } else if (item.indent > top.indent) {
+      html += openTag(item);
+      stack.push({ indent: item.indent, tag });
+    } else {
+      html += "</li>";
+      // same depth, different marker: a sibling list, not a new item
+      if (top.tag !== tag) {
+        html += `</${stack.pop().tag}><${tag}>`;
+        stack.push({ indent: item.indent, tag });
+      }
+      html += "<li>";
+    }
+    html += inlineMd(item.text);
+  }
+  while (stack.length) html += `</li></${stack.pop().tag}>`;
+  return { html, next: i };
+}
+
+/** Prism grammar for a fence's info string, or null when there is nothing to
+ *  highlight. `text`/`txt`/`plain` are Prism's no-op grammars, and a fence with
+ *  no info string would need guessing — a bash session's code is mostly shell,
+ *  but guessing wrong colors identifiers as strings and reads worse than plain. */
+function prismGrammar(lang) {
+  if (!lang || !prism()) return null;
+  const name = FENCE_LANGS[lang.toLowerCase()] || lang.toLowerCase();
+  const grammar = prism()?.languages[name];
+  return grammar && name !== "plain" && name !== "text" ? { name, grammar } : null;
+}
+/** The vendored Prism global, or undefined on a page where the script is absent.
+ *  Declared here so the typecheck knows its shape: Prism ships no types and the
+ *  globals it registers are not part of lib.dom. */
+function prism() {
+  return /** @type {{ languages: Record<string, unknown>, highlight: (code: string, grammar: unknown, lang: string) => string } | undefined} */ (
+    /** @type {any} */ (window).Prism
+  );
+}
+/** Fence info strings that differ from Prism's grammar name, plus the aliases
+ *  Prism itself does not register. Anything else is looked up verbatim, so a
+ *  grammar added to the vendored bundle needs no entry here. */
+const FENCE_LANGS = {
+  js: "javascript", mjs: "javascript", cjs: "javascript", node: "javascript",
+  ts: "typescript", tsx: "typescript", jsx: "javascript",
+  sh: "bash", shell: "bash", zsh: "bash", console: "bash",
+  md: "markdown", yml: "yaml", py: "python",
+  html: "markup", xml: "markup", svg: "markup",
+};
+/** Verbatim HTML for one fenced block, or "" when it stays plain.
+ *
+ *  Two limits keep this from becoming a scroll-jank source: a block over
+ *  MAX_HIGHLIGHT_CHARS is shown plain (Prism is ~3.5 MB/s, so 200 KB would be a
+ *  ~57 ms synchronous stall inside a render), and a grammar that throws falls
+ *  back to the escaped text rather than losing the block. */
+const MAX_HIGHLIGHT_CHARS = 200000;
+function highlightCode(raw, lang) {
+  const pick = prismGrammar(lang);
+  const engine = prism();
+  if (!pick || !engine || raw.length > MAX_HIGHLIGHT_CHARS) return "";
+  try {
+    return engine.highlight(raw, pick.grammar, pick.name);
+  } catch {
+    return "";
+  }
+}
+
 function renderMarkdown(text) {
   const out = [];
   const lines = esc(text).split("\n");
+  // esc() escapes characters, never newlines, so these line arrays are the same
+  // length and share indices. Prism needs the *raw* text (it escapes entities
+  // itself, so feeding it pre-escaped code would double-encode `&lt;`).
+  const rawLines = text.split("\n");
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
@@ -276,13 +382,15 @@ function renderMarkdown(text) {
     if (fence) {
       const buf = [];
       i++;
+      const bodyStart = i;
       while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      const raw = rawLines.slice(bodyStart, i).join("\n");
       i++; // closing fence
       const lang = fence[1] ? `<span class="code-lang">${esc(fence[1])}</span>` : "";
       // buf is already HTML-escaped (renderMarkdown escapes up front), which also
       // makes it attribute-safe; dataset.code decodes it back to the raw text
       out.push(
-        `<div class="code-block"><div class="code-head">${lang}<button class="code-copy" type="button" data-code="${buf.join("\n")}">copy</button></div><pre><code>${buf.join("\n")}</code></pre></div>`
+        `<div class="code-block"><div class="code-head">${lang}<button class="code-copy" type="button" data-code="${buf.join("\n")}">copy</button></div><pre><code>${highlightCode(raw, fence[1]) || buf.join("\n")}</code></pre></div>`
       );
       continue;
     }
@@ -294,13 +402,9 @@ function renderMarkdown(text) {
       continue;
     }
     if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\./.test(line);
-      const buf = [];
-      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) {
-        buf.push(`<li>${inlineMd(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, ""))}</li>`);
-        i++;
-      }
-      out.push(`<${ordered ? "ol" : "ul"}>${buf.join("")}</${ordered ? "ol" : "ul"}>`);
+      const list = renderList(lines, i);
+      out.push(list.html);
+      i = list.next;
       continue;
     }
     if (/^\s*>\s?/.test(line)) {
@@ -851,6 +955,31 @@ function toolcallState(block) {
   return { call, ex, result, exec, statusText };
 }
 
+/** How long a still-running call has been running, or null when it is not running.
+ *
+ *  This exists because a hung child process is the one failure the transcript
+ *  could not show: `durationMs` is only set when `tool_execution_end` arrives,
+ *  so a bash call whose command never returns sat on screen reading "queued" or
+ *  "running" forever with nothing to distinguish "started 2s ago" from "stuck
+ *  for 43 minutes". That is what made a hung Chrome look like a dead UI.
+ *
+ *  Elapsed time is derived at render, not stored, so no timer is needed: the run
+ *  already repaints on every progress tick, and STALL_REPAINT_MS keeps the clock
+ *  moving even when a silent command produces no ticks at all. */
+function runningFor(exec) {
+  if (!exec || exec.status !== "running" || !exec.startedAt) return null;
+  return Date.now() - exec.startedAt;
+}
+
+/** A running call this long without finishing is reported as possibly stalled.
+ *  Two minutes is deliberately conservative: a legitimate `npm test` or a build
+ *  can exceed it, so the row says "slow or stuck" and points at Stop rather than
+ *  claiming the run is dead. */
+const STALL_AFTER_MS = 120_000;
+/** Repaint cadence while a call is running, so its elapsed time keeps counting
+ *  even when the command emits no output (the hung case). */
+const STALL_REPAINT_MS = 5_000;
+
 // Tool output is unbounded (a grep over a repo, a full file read). The popup
 // scrolls, so text is shown in full up to this cap instead of being clipped
 // behind a "show all" toggle.
@@ -924,8 +1053,34 @@ function imageSrcOf(block) {
     if (cached) return cached;
     return null;
   }
+  // `data: ""` is an offloaded-but-unresolved placeholder, not inline bytes:
+  // `data:image/png;base64,` is a valid-looking URL that decodes to nothing, so
+  // it has to be reported as missing instead of rendered as a broken image.
   if (block.data) return `data:${block.mimeType};base64,${block.data}`;
   return null;
+}
+
+/** Fetch one offloaded image once, sharing the in-flight request between every
+ *  block that references the same id (a session can show the same screenshot in
+ *  a prompt and in the tool call that produced it). */
+const imageBlockPending = new Map(); // imageId -> Promise<string>
+
+function loadImageBlock(block) {
+  const id = block.imageId;
+  const done = imageBlockCache.get(id);
+  if (done) return Promise.resolve(done);
+  const inflight = imageBlockPending.get(id);
+  if (inflight) return inflight;
+  const req = fetch(`/api/image-block?id=${encodeURIComponent(id)}`)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error("image no longer available"))))
+    .then((body) => {
+      const dataUrl = `data:${block.mimeType};base64,${body.data}`;
+      imageBlockCache.set(id, dataUrl);
+      return dataUrl;
+    })
+    .finally(() => imageBlockPending.delete(id));
+  imageBlockPending.set(id, req);
+  return req;
 }
 
 /** Insert an image block, filling it in from the server if its bytes were
@@ -945,11 +1100,8 @@ function appendImageBlock(parent, block, style = "max-width:320px;border-radius:
   }
   const holder = el("div", { class: "tc-text dim", text: "loading image…" });
   parent.append(holder);
-  fetch(`/api/image-block?id=${encodeURIComponent(block.imageId)}`)
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error("image no longer available"))))
-    .then((body) => {
-      const dataUrl = `data:${block.mimeType};base64,${body.data}`;
-      imageBlockCache.set(block.imageId, dataUrl);
+  loadImageBlock(block)
+    .then((dataUrl) => {
       const img = imageEl(dataUrl);
       if (style) img.querySelector("img").style.cssText = style;
       holder.replaceWith(img);
@@ -2120,13 +2272,22 @@ function renderToolcall(_item, block) {
   }
 
   const summary = argsSummary(call) || JSON.stringify(call.arguments || {}).slice(0, 80);
+  // A running call shows how long it has been running, in place of the duration
+  // that only a finished call has. Past STALL_AFTER_MS it is flagged, because
+  // "running" alone cannot tell a fast command from a hung one.
+  const elapsed = runningFor(exec);
+  const stalled = elapsed != null && elapsed >= STALL_AFTER_MS;
   const head = el(
     "div",
     headOpts,
     el("span", { class: "tc-open-icon", text: "↗" }),
     el("span", { class: "tc-name", text: call.name }),
     el("span", { class: "tc-summary", text: summary }),
-    exec.durationMs != null ? el("span", { class: "tc-duration", text: fmtDuration(exec.durationMs) }) : null,
+    exec.durationMs != null
+      ? el("span", { class: "tc-duration", text: fmtDuration(exec.durationMs) })
+      : elapsed != null
+        ? el("span", { class: `tc-duration${stalled ? " stalled" : ""}`, text: fmtElapsed(elapsed), title: stalled ? "Still running — this may be a stuck command; Stop aborts it" : "Elapsed so far" })
+        : null,
     el("span", { class: `tc-status ${statusText}`, text: statusText })
   );
   card.append(head);
@@ -2153,10 +2314,28 @@ function renderAssistantMeta(meta) {
   return line;
 }
 
-/** an inline prompt image in a user turn: a thumbnail that opens the popup,
- *  then the full-window viewer */
+/** An inline prompt image in a user turn: a thumbnail that opens the popup,
+ *  then the full-window viewer.
+ *
+ *  A prompt sent in this tab arrives with its base64 inline, but a prompt read
+ *  back from a session file arrives as an `imageId` placeholder — the server
+ *  keeps the bytes out of the transcript (see sdk/images.js), so reading `data`
+ *  directly here rendered `data:image/png;base64,` and left a broken image that
+ *  could not be enlarged. Both shapes go through the same loader now. */
 function promptImage(img) {
-  const src = `data:${img.mimeType};base64,${img.data}`;
+  const src = imageSrcOf(img);
+  if (src) return promptImageEl(src);
+  if (!img.imageId) return el("div", { class: "tc-text dim", text: "image data unavailable" });
+  const holder = el("div", { class: "tc-text dim", text: "loading image…" });
+  loadImageBlock(img)
+    .then((dataUrl) => holder.replaceWith(promptImageEl(dataUrl)))
+    .catch((err) => {
+      holder.textContent = err.message || "image could not be loaded";
+    });
+  return holder;
+}
+
+function promptImageEl(src) {
   return el("img", { src, alt: "prompt image", title: "Click to enlarge", onclick: () => openImagePopup(src, "prompt image") });
 }
 
@@ -2527,6 +2706,8 @@ function renderTranscript({ follow = true } = {}) {
 }
 
 let renderScheduled = false;
+/** Keeps elapsed-time labels counting; see the interval below. */
+let elapsedTimer = null;
 function scheduleRender() {
   if (renderScheduled) return;
   renderScheduled = true;
@@ -2535,6 +2716,21 @@ function scheduleRender() {
     renderTranscript();
   });
 }
+
+/** Keep a running call's elapsed time counting while it is silent.
+ *
+ *  The transcript repaints when an event arrives, which a hung command never
+ *  produces — so without this the "running 2m14s" on a stuck bash row would
+ *  freeze at the moment its last output arrived, which is worse than not showing
+ *  it: it would look like a timer that had stopped rather than a command that
+ *  had. A no-op whenever nothing is running, so the interval costs a Map scan.
+ *  renderStatus is called directly because the deadline lives in the status bar
+ *  too, and it is a text assignment when nothing changed. */
+elapsedTimer = setInterval(() => {
+  if (!state.isStreaming && !slowestRunningCall()) return;
+  renderStatus();
+  scheduleRender();
+}, STALL_REPAINT_MS);
 
 function scrollBottom() {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
@@ -3442,10 +3638,44 @@ function renderProcessBar() {
   bar.classList.remove("hidden");
 }
 
+/** Elapsed wall time for a still-running call: minutes and seconds once it is
+ *  past a minute, so "1m" cannot hide the difference between 61 s and 59 min.
+ *  fmtDuration is for durations that are known to be short (a finished call), so
+ *  a long run gets its own reader-facing form. */
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+/** The longest-running tool call in the current run, or null when none is.
+ *  Drives the one line that answers "is pi working, or is it stuck?" without
+ *  making the reader hunt through the transcript for the running row. */
+function slowestRunningCall() {
+  let worst = null;
+  for (const [id, ex] of state.executions) {
+    const elapsed = runningFor(ex);
+    if (elapsed == null) continue;
+    if (!worst || elapsed > worst.elapsed) worst = { id, elapsed, toolName: ex.toolName };
+  }
+  return worst;
+}
+
 function renderStatus() {
   const bar = $("#status-bar");
   if (state.isStreaming) {
-    $("#status-text").textContent = state.isCompacting ? "compacting…" : "pi is working…";
+    let text = state.isCompacting ? "compacting…" : "pi is working…";
+    // Name the running tool and how long it has been running: without this the
+    // status line reads identically whether the model is thinking or a shell
+    // command has been hung for the last three quarters of an hour.
+    const slow = slowestRunningCall();
+    if (slow) {
+      text += ` · ${slow.toolName || "tool"} running ${fmtElapsed(slow.elapsed)}`;
+      if (slow.elapsed >= STALL_AFTER_MS) text += " — possibly stuck; Stop aborts it";
+    }
+    $("#status-text").textContent = text;
     bar.classList.remove("hidden");
   } else bar.classList.add("hidden");
   // the leftover-process rows sit beside the working line and outlive it: a
@@ -5271,6 +5501,11 @@ function handleEvent(record) {
     case "tool_execution_start": {
       const ex = state.executions.get(record.toolCallId) || { updates: [] };
       ex.status = "running";
+      ex.toolName = record.toolName;
+      // When the call actually started, so a row can show how long it has been
+      // running. `durationMs` only arrives with `tool_execution_end`, which is
+      // exactly the case that never comes for a hung child — see runningFor().
+      ex.startedAt = Date.now();
       state.executions.set(record.toolCallId, ex);
       markToolcallDirty(record.toolCallId);
       break;
@@ -6221,6 +6456,13 @@ const ICON_MOON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" f
 /** the palette list, lightest mood first: this order is the menu order */
 const THEMES = ["mono", "sky", "grove", "ember", "elegant", "night"];
 const DEFAULT_THEME = "sky";
+/** The palette a first visit gets. The page cannot ask before `boot()` runs, so
+ *  `index.html` has an inline copy of this decision to paint the right color
+ *  before style.css loads; both must agree, and both follow the OS preference
+ *  rather than forcing light on a dark desktop. */
+function firstVisitTheme() {
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "night" : DEFAULT_THEME;
+}
 const THEME_CHROME = {
   mono: "#eef0f2",
   sky: "#e8f0fa",
@@ -6233,7 +6475,9 @@ const THEME_CHROME = {
  *  still has to resolve, so anything unknown maps onto the closest match */
 function normalizeTheme(theme) {
   if (THEMES.includes(theme)) return theme;
-  return theme === "dark" ? "night" : DEFAULT_THEME;
+  if (theme === "dark") return "night";
+  if (theme === "light") return DEFAULT_THEME;
+  return firstVisitTheme();
 }
 /** parse a static SVG string into a live element (no untrusted input) */
 function svgIcon(markup) {
@@ -6576,7 +6820,7 @@ function connectEvents() {
 // boot
 // ---------------------------------------------------------------------------
 (async function boot() {
-  applyTheme(localStorage.getItem("piweb-theme") || DEFAULT_THEME);
+  applyTheme(localStorage.getItem("piweb-theme") || firstVisitTheme());
   // Paint the initial state first: if the server is already gone, the banner
   // and the composer note must be on screen before any request is awaited, so
   // the page never shows an enabled composer over a dead server.

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * End-to-end smoke test for pi-web. No dependencies, no test framework.
+ * End-to-end smoke test for pi-ui. No dependencies, no test framework, so the file runs
+ * on a bare checkout: `node test/smoke.js`.
  *
  *   node test/smoke.js
  *
@@ -26,10 +27,10 @@ const BASE = `http://127.0.0.1:${PORT}`;
 
 // A throwaway session directory keeps /api/sessions and /api/search
 // deterministic and independent of whatever real sessions this machine has.
-const FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-smoke-"));
+const FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ui-smoke-"));
 // Follow-ups live in their own directory, so the smoke test exercises the real
 // save/list/read/delete path without touching ~/.pi/followups.
-const FOLLOWUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-followups-"));
+const FOLLOWUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ui-followups-"));
 function writeFixture(dirName, file, lines) {
   const dir = path.join(FIXTURE_DIR, dirName);
   fs.mkdirSync(dir, { recursive: true });
@@ -665,6 +666,74 @@ async function backgroundProcessChecks() {
 }
 
 
+/** Two sessions in one workspace must not share an extension runtime.
+ *
+ *  The regression this pins: `AgentSessionServices` bundles the resource loader,
+ *  and behind it one extension runtime. Sessions built from a cached per-cwd
+ *  services object therefore shared that runtime, and `AgentSession.dispose()`
+ *  calls `extensionRunner.invalidate()` on it — so disposing any one session (the
+ *  idle reaper, or the old session a new/fork/switch hands off from) left every
+ *  other session in the workspace with handlers that throw "This extension ctx
+ *  is stale", and every session opened afterwards reported that error on its own
+ *  `session_start`. The stale ctx is observable directly, without any extension
+ *  of the user's own: `runtime.assertActive()` throws once poisoned. */
+async function workspaceIsolationChecks() {
+  const { SessionHost } = await import(path.join(ROOT, "sdk", "host.js"));
+  const { loadSdk } = await import(path.join(ROOT, "sdk", "load.js"));
+  let sdk;
+  try {
+    ({ mod: sdk } = await loadSdk());
+  } catch (err) {
+    check("the SDK is loadable, so workspace isolation can be checked", false, err.message);
+    return;
+  }
+  const clients = new Map();
+  const host = new SessionHost({ sdk, cwd: ROOT, sessionDir: FIXTURE_DIR, clients });
+  const open = async (client) => {
+    clients.set(client, { res: null, key: null, detachedAt: 0 });
+    await host.open({ client });
+  };
+  // Disposing the way `#drop` and `#replace` do, so the check covers the path the
+  // server actually takes rather than only AgentSession.dispose() in isolation.
+  const drop = async (key) => {
+    const session = host.sessions.get(key);
+    host.sessions.delete(key);
+    for (const [file, k] of host.fileAlias) if (k === key) host.fileAlias.delete(file);
+    await session.dispose();
+  };
+  const live = (session) => {
+    try {
+      session.session.extensionRunner.runtime.assertActive();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  await open("iso-a");
+  await open("iso-b");
+  const [firstKey, secondKey] = [...host.sessions.keys()];
+  check("two sessions in one workspace are both live", live(host.sessions.get(firstKey)) && live(host.sessions.get(secondKey)));
+
+  await drop(firstKey);
+  check(
+    "disposing one session does not invalidate its sibling's extension ctx",
+    live(host.sessions.get(secondKey))
+  );
+
+  await open("iso-c");
+  check(
+    "a session opened after a sibling was disposed still has a live extension ctx",
+    live([...host.sessions.values()].at(-1))
+  );
+  check("one workspace is shared, not one per session", host.workspaces.size === 1);
+  // Sessions hold live model runtimes, MCP connections and extension event
+  // buses. Leaving them bound keeps the event loop alive, so the process would
+  // print "all smoke checks passed" and then hang instead of exiting — which is
+  // what made this file look like it needed a manual kill.
+  await host.disposeAll();
+}
+
 /** The in-process ExtensionUi replaces the RPC bridge's dialog plumbing. A
  *  resolution bug here would hang any extension that asks the user a question,
  *  so the promise contract is checked directly rather than through a dialog. */
@@ -809,13 +878,31 @@ try {
   const index = await fetch(`${BASE}/`);
   const html = await index.text();
   check("GET / returns 200", index.status === 200, `got ${index.status}`);
-  check("page has the app title", html.includes("<title>pi-web</title>"));
+  check("page has the app title", html.includes("<title>pi-ui</title>"));
   check("page links the stylesheet", html.includes('href="/style.css"'));
   check("page loads the frontend script", html.includes('src="/app.js"'));
 
-  for (const asset of ["/style.css", "/app.js", "/favicon.svg"]) {
+  for (const asset of ["/style.css", "/app.js", "/favicon.svg", "/vendor/prism.min.js"]) {
     const res = await fetch(`${BASE}${asset}`);
     check(`GET ${asset} returns 200`, res.status === 200, `got ${res.status}`);
+  }
+
+  // Syntax highlighting is vendored, not a dependency: it has to be served from
+  // a bare checkout, and the script has to load before app.js so the first
+  // render finds `window.Prism`. `data-manual` matters — Prism's own
+  // auto-highlight rescans every `code[class*=language-]` on the page, which
+  // this app never wants because it highlights each block as it renders it.
+  {
+    const prism = await fetch(`${BASE}/vendor/prism.min.js`);
+    check("the vendored Prism bundle is offered", prism.status === 200, `got ${prism.status}`);
+    check("the Prism bundle is served as JavaScript", /javascript/.test(prism.headers.get("content-type") || ""));
+    const body = await prism.text();
+    check("the bundle carries a grammar the transcripts use", body.includes("languages.bash"));
+    // diff is the one grammar that is not a language a model writes: every edit
+    // tool result renders as a diff fence, so it must be in the bundle.
+    check("the bundle carries the diff grammar", body.includes("languages.diff"));
+    check("prism.min.js loads before app.js", html.indexOf("/vendor/prism.min.js") < html.indexOf('/app.js"'));
+    check("Prism auto-highlight is disabled", /prism\.min\.js"[^>]*data-manual/.test(html));
   }
 
   // A file:// link used to fall through the inline parser and render as raw
@@ -827,6 +914,51 @@ try {
   check("app.js turns a local-link click into a copy", appJs.includes('closest?.("a.local-link")'));
   const css = await (await fetch(`${BASE}/style.css`)).text();
   check("style.css gives rendered links a palette color", css.includes(".assistant-text a {"));
+
+  // A nested list is structure, not decoration: "rule, then its two sub-rules"
+  // flattened into three siblings reads as three peers. Every saved session
+  // contains such a list, so the renderer has to keep the indent, and an
+  // ordered list that starts at 3 must not be renumbered to 1.
+  check("app.js nests lists by indentation", appJs.includes("function renderList(lines, start)") && appJs.includes("stack.push({ indent: item.indent, tag })"));
+  check("app.js keeps an ordered list's start number", appJs.includes('` start='));
+
+  // A hung child process was the one failure the transcript could not show: a
+  // bash call whose command never returns kept the "running" chip forever, so
+  // "started 2s ago" and "stuck for 43 minutes" looked identical and the only
+  // way to tell was `ps`. The start time is now recorded and rendered, and the
+  // status line names the tool so the answer is visible without scrolling.
+  check("app.js records when a tool call started", /case "tool_execution_start"[\s\S]{0,400}ex\.startedAt = Date\.now\(\)/.test(appJs));
+  check("app.js derives elapsed time for a running call", appJs.includes("function runningFor(exec)"));
+  check("app.js flags a call that may be stuck", /STALL_AFTER_MS = \d[\d_]*/.test(appJs) && appJs.includes("tc-duration${stalled ? \" stalled\" : \"\"}"));
+  check("the status line names the running tool", appJs.includes("toolName || \"tool\"} running ${fmtElapsed(slow.elapsed)}"));
+  check("elapsed time keeps counting while a call is silent", appJs.includes("elapsedTimer = setInterval") && /elapsedTimer = setInterval[\s\S]{0,220}STALL_REPAINT_MS/.test(appJs));
+  check("style.css marks a stalled call", css.includes(".tc-duration.stalled"));
+
+  // Syntax highlighting: a fenced block with a known language is tokenized, an
+  // unknown one stays plain rather than guessing, and an oversized block is
+  // rendered plain so one paste cannot stall a render.
+  check("app.js highlights a known fence language", appJs.includes("function highlightCode(raw, lang)"));
+  check("app.js caps the text it will highlight", /MAX_HIGHLIGHT_CHARS = \d+/.test(appJs));
+  check("app.js falls back to plain text if a grammar throws", /function highlightCode[\s\S]{0,400}catch \{[\s\S]{0,80}return ""/.test(appJs));
+  check("style.css colors Prism tokens", css.includes(".assistant-text .token.comment") && css.includes(".assistant-text .token.keyword"));
+
+  // A prompt image read back from a session file arrives as an `imageId`
+  // placeholder, not inline base64 (sdk/images.js keeps the bytes out of the
+  // transcript). Rendering it straight from `data` gave `data:image/png;base64,`
+  // — a broken thumbnail that could not be enlarged. Prompt images have to go
+  // through the same on-demand loader tool-result images use.
+  check("app.js resolves a prompt image through the image-block loader", /function promptImage\(img\)[\s\S]{0,600}loadImageBlock\(img\)/.test(appJs));
+  check(
+    "app.js does not render a prompt image straight from placeholder bytes",
+    !/data:\$\{img\.mimeType\};base64,\$\{img\.data\}/.test(appJs)
+  );
+  check("app.js shares one fetch per offloaded image", appJs.includes("const imageBlockPending = new Map()"));
+
+  // The first paint cannot wait for app.js, so index.html decides the palette
+  // inline — and it has to agree with firstVisitTheme(), or a dark desktop gets
+  // a white flash and then a repaint.
+  check("index.html picks the palette before paint", html.includes("document.documentElement.dataset.theme = theme"));
+  check("a first visit follows the OS theme", /prefers-color-scheme: dark/.test(html) && appJs.includes("(prefers-color-scheme: dark)"));
 
   // The Follow-up control is a toggle: a second press removes what the first
   // press saved. Both halves have to be present — the pressed class the render
@@ -863,7 +995,9 @@ try {
   check("the dock reserves a row container for leftover processes", html.includes('id="process-bar"'));
   check("app.js renders one dock row per leftover process", appJs.includes("function renderProcessBar"));
   check("app.js gives each dock row a Stop", appJs.includes('text: "Stop", title: `Stop ${p.pid}'));
-  check("app.js re-renders the dock rows with the status bar", /function renderStatus\(\)[\s\S]{0,400}renderProcessBar\(\)/.test(appJs));
+  // The window is generous because renderStatus now also composes the running-tool
+  // line, which lengthened the function; the assertion still means the same thing.
+  check("app.js re-renders the dock rows with the status bar", /function renderStatus\(\)[\s\S]{0,1200}renderProcessBar\(\)/.test(appJs));
   check("opening the resources panel acknowledges the badge", /function setResourcesOpen\(open\)[\s\S]{0,900}acknowledgeProcesses\(\)/.test(appJs));
 
   // Streaming must not parse Markdown per delta: it paints literal text into one
@@ -1174,7 +1308,11 @@ try {
   for (const attempt of ["/../package.json", "/..%2fpackage.json", "/%2e%2e/server.js", "/../server.js"]) {
     const res = await fetch(`${BASE}${attempt}`, { redirect: "manual" });
     const body = res.status === 200 ? await res.text() : "";
-    check(`traversal ${attempt} is not served`, res.status !== 200 || !body.includes('"name": "pi-web"'), `got ${res.status}`);
+    check(
+      `traversal ${attempt} is not served`,
+      res.status !== 200 || !body.includes('"name": "pi-ui"'),
+      `got ${res.status}`
+    );
   }
 
   // A malformed command must be a clean 4xx, never a stack trace or a crash.
@@ -1191,7 +1329,25 @@ try {
   const img = (q) => fetch(`${BASE}/api/image?${q}`);
   check("/api/image rejects a relative path", (await img("path=package.json")).status === 400);
   check("/api/image rejects an empty path", (await img("path=")).status === 400);
-  check("/api/image 404s a missing file", (await img(`path=${encodeURIComponent("/tmp/pi-web-nope.png")}`)).status === 404);
+  check("/api/image-block rejects an empty id", (await fetch(`${BASE}/api/image-block?id=`)).status === 404);
+  check("/api/image-block 404s an unknown id", (await fetch(`${BASE}/api/image-block?id=img-does-not-exist`)).status === 404);
+
+  // A prompt image read back from a session file must be recoverable: the
+  // transcript carries only the placeholder, so this route is the only way its
+  // bytes reach the browser. An offloaded entry is what the session file holds.
+  {
+    const { ImageStash, offloadEntries } = await import(path.join(ROOT, "sdk", "images.js"));
+    const stash = new ImageStash();
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+    const [offloaded] = offloadEntries(
+      [{ type: "message", message: { role: "user", content: [{ type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: png }] } }],
+      stash
+    );
+    const image = offloaded.message.content.find((b) => b.type === "image");
+    check("an offloaded prompt image keeps an id and no inline bytes", Boolean(image.imageId) && image.data === "", JSON.stringify(image).slice(0, 120));
+    check("the stash holds the bytes for that id", stash.get(image.imageId) === png);
+  }
+
   const notImage = await img(`path=${encodeURIComponent(path.join(ROOT, "server.js"))}`);
   check("/api/image refuses a non-image file", notImage.status === 415, `got ${notImage.status}`);
   const realPng = path.join(ROOT, "public", "favicon.svg");
@@ -1419,6 +1575,10 @@ try {
   // Extension dialogs resolve through the in-process UI context, which the RPC
   // bridge used to provide by writing to stdout. No server or credentials needed.
   await extensionUiChecks();
+  // Two sessions in one workspace must not share an extension runtime: disposing
+  // one used to poison the other's ctx, and every session opened after that
+  // reported the stale-ctx error on session_start.
+  await workspaceIsolationChecks();
 } finally {
   stopServer();
   fs.rmSync(FIXTURE_DIR, { recursive: true, force: true });
@@ -1431,3 +1591,11 @@ if (failures) {
   process.exit(1);
 }
 console.log("\nall smoke checks passed");
+// Exit explicitly rather than waiting for the event loop to drain. Extensions
+// loaded by the workspace-isolation check can leave auxiliary child processes
+// running (pi-lens spawns opengrep and madge, which keep a handle open), so
+// without this the process prints "all smoke checks passed" and then sits there
+// forever — `npm test` looks hung and has to be killed by hand even though every
+// check passed. Nothing here needs a graceful shutdown: the servers it started
+// are already stopped in the `finally` above.
+process.exit(0);

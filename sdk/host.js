@@ -20,11 +20,11 @@
  * ## Why one session per key, not in-process switching
  *
  * `switch_session` inside one process invalidates every extension context that
- * captured `ctx`, which is why pi-web used a process per session. The SDK's
+ * captured `ctx`, which is why the RPC bridge needed a process per session. The SDK's
  * `AgentSessionRuntime` avoids that by rebuilding the extension runner, but the
  * host still has to rebind subscriptions on every switch, and a session that is
  * mid-run cannot be switched away from at all. A pool keyed by session file — the
- * map pi-web already has — sidesteps both: each open session keeps its own
+ * map the RPC bridge already has — sidesteps both: each open session keeps its own
  * `AgentSession`, its own queue and its own run, and no switch ever happens.
  * What changes is only the cost of *creating* one.
  *
@@ -48,7 +48,7 @@ const IDLE_REAP_MS = 30 * 60 * 1000;
 const PROMPT_DISPOSITIONS = new Set(["started", "queued", "handled"]);
 
 /**
- * One open session: an `AgentSession` plus the browser bookkeeping pi-web kept
+ * One open session: an `AgentSession` plus the browser bookkeeping the RPC bridge kept
  * on its subprocess (queue snapshot, leftover background processes, clients).
  */
 class Session {
@@ -238,41 +238,66 @@ export class SessionHost {
      *  only place an SSE response is written and closed; the host reads and
      *  writes the same map so a broadcast can find every attached tab. */
     this.clients = clients;
-    /** cwd -> AgentSessionServices. The expensive part, shared per workspace. */
-    this.services = new Map();
+    /** cwd -> the part of a workspace that is genuinely shared by its sessions. */
+    this.workspaces = new Map();
     /** cwd -> in-flight promise, so two tabs opening at once share one build. */
-    this.servicesPending = new Map();
+    this.workspacesPending = new Map();
   }
 
   // -------------------------------------------------------------------------
   // workspace services
   // -------------------------------------------------------------------------
 
-  /** Cached cwd services. Concurrent callers share one build. */
-  async servicesFor(cwd) {
+  /** The shareable half of a workspace's services. Concurrent callers share one
+   *  build.
+   *
+   *  Deliberately NOT the whole `AgentSessionServices`: those bundle a resource
+   *  loader, and behind it the extension runtime that every session built from
+   *  the same object would then share. `AgentSession.dispose()` calls
+   *  `extensionRunner.invalidate()` on that runtime, so one session going away —
+   *  the idle reaper, or the old session a new/fork/switch hands off from —
+   *  leaves every other session in the workspace with extension handlers that
+   *  throw "This extension ctx is stale", and every session opened afterwards
+   *  reports the same error on its own `session_start`. Rebuilding the loader
+   *  per session is what keeps the runtimes separate; the model runtime (network
+   *  catalog, provider registrations) and the settings manager are the parts
+   *  that are safe, and expensive enough, to share. */
+  async workspaceFor(cwd) {
     const resolved = path.resolve(cwd);
-    const cached = this.services.get(resolved);
+    const cached = this.workspaces.get(resolved);
     if (cached) return cached;
-    const pending = this.servicesPending.get(resolved);
+    const pending = this.workspacesPending.get(resolved);
     if (pending) return pending;
     const build = (async () => {
       try {
         const services = await this.sdk.createAgentSessionServices({ cwd: resolved });
-        this.services.set(resolved, services);
-        return services;
+        const shared = { modelRuntime: services.modelRuntime, settingsManager: services.settingsManager };
+        this.workspaces.set(resolved, shared);
+        return shared;
       } finally {
-        this.servicesPending.delete(resolved);
+        this.workspacesPending.delete(resolved);
       }
     })();
-    this.servicesPending.set(resolved, build);
+    this.workspacesPending.set(resolved, build);
     return build;
   }
 
-  /** Forget a workspace's services so the next open rebuilds them (a `/reload`,
-   *  or an extension that was installed while the server ran). */
-  dropServices(cwd) {
+  /** One session's own services: the workspace's shared parts plus a fresh
+   *  resource loader, hence a fresh extension runtime. */
+  async servicesFor(cwd) {
     const resolved = path.resolve(cwd);
-    this.services.delete(resolved);
+    const shared = await this.workspaceFor(resolved);
+    return this.sdk.createAgentSessionServices({
+      cwd: resolved,
+      modelRuntime: shared.modelRuntime,
+      settingsManager: shared.settingsManager,
+    });
+  }
+
+  /** Forget a workspace so the next open re-reads its extensions and settings (a
+   *  `/reload`, or an extension installed while the server ran). */
+  dropWorkspace(cwd) {
+    this.workspaces.delete(path.resolve(cwd));
   }
 
   /**
