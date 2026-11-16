@@ -1014,6 +1014,22 @@ try {
   check("app.js un-keeps a follow-up on a second press", appJs.includes("async function unsaveFollowup"));
   check("style.css paints the pressed Follow-up control", css.includes(".turn-action.kept {"));
 
+  // Copying a summary used to offer only the rich flavour, which a Slack
+  // message box drops: it pastes the rendered HTML or the raw Markdown, and
+  // Slack renders neither as written. The Slack button must be its own path —
+  // mrkdwn text on the clipboard — not a second label on the rich copy.
+  check("app.js converts a document to Slack mrkdwn", appJs.includes("function slackMrkdwn("));
+  check("the Slack button copies text, not the rich flavour", /function copySlackText\([\s\S]{0,300}clipboard\.writeText\(slackMrkdwn/.test(appJs));
+  check("assistant turns offer the Slack copy", /function copyTurnAsSlack\([\s\S]{0,300}copySlackText/.test(appJs));
+  check("a saved follow-up offers the Slack copy", /title: "Copy as Slack mrkdwn[\s\S]{0,300}copySlackText\(rec\.text\)/.test(appJs));
+  // Slack's dialect is not Markdown's: **bold** has to leave as *bold*, and an
+  // escaped `&` must not double-encode the entities the same pass writes.
+  check(
+    "Slack bold is a single asterisk",
+    appJs.includes("replace(/\\*\\*([^*]+)\\*\\*/g, (m, bold) => hold(`*${bold}*`))")
+  );
+  check("Slack escaping handles the ampersand first", /\.replace\(\/&\/g, "&amp;"\)\.replace\(\/<\/g, "&lt;"\)/.test(appJs));
+
   // A dead or hung server used to look like a healthy page: the transcript and
   // sidebar stayed on screen, the composer still accepted text, and the only
   // sign was "connection lost — retrying…" in a sidebar corner (plus a bare

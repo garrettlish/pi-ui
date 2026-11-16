@@ -273,6 +273,143 @@ function isTableStart(lines, i) {
   return lines[i].includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1]);
 }
 
+// ---------------------------------------------------------------------------
+// Slack mrkdwn
+// ---------------------------------------------------------------------------
+// Slack is not a document: pasting a summary's Markdown into a message shows
+// the Markdown itself, because Slack's dialect differs — *bold* not **bold**,
+// <url|label> not [label](url), no headings, no tables. The copy button for a
+// document keeps the rich flavour; this is the text a message needs.
+
+/** Escape the three characters Slack reads as control syntax. `&` must go
+ *  first, or the entities this function writes would be escaped again. */
+function slackEsc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Display width of a table cell: a CJK glyph occupies two columns, so padding
+ *  by length alone leaves a Chinese summary's table visibly ragged. */
+function cellWidth(s) {
+  let w = 0;
+  for (const ch of String(s)) w += /[\u1100-\u115f\u2e80-\ua4cf\ua960-\ua97f\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1;
+  return w;
+}
+
+/** A table cell as plain text, for a code block where nothing is markup. */
+function slackCellText(cell) {
+  return cell
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/(^|\W)\*([^*\s][^*]*)\*/g, "$1$2")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1 ($2)");
+}
+
+/** One line of inline Markdown as Slack mrkdwn.
+ *
+ *  Delimiters are lifted out as sentinels in the order Slack would misread
+ *  them: inline code first (its content must stay byte-for-byte literal — a
+ *  `*` inside `code` is not emphasis and a `<` in code is not an escape), then
+ *  bold, whose `*bold*` would otherwise be rewritten as `_bold_` by the italic
+ *  rule below it. Everything left is escaped before the link rule, because
+ *  Slack reads `<` and `<url|label>` as its own syntax. */
+function slackInline(raw) {
+  const held = [];
+  const hold = (text) => `\u0000${held.push(text) - 1}\u0000`;
+  let s = String(raw).replace(/`([^`]+)`/g, (m, code) => hold(`\`${code}\``));
+  s = slackEsc(s);
+  s = s.replace(/\[([^\]]+)\]\(((?:https?|file):\/\/[^)\s]+)\)/g, (m, label, href) => `<${href}|${label}>`);
+  s = s.replace(/\*\*([^*]+)\*\*/g, (m, bold) => hold(`*${bold}*`));
+  s = s.replace(/(^|[^\w*])\*([^*\s][^*]*)\*/g, "$1_$2_");
+  s = s.replace(/~~([^~]+)~~/g, "~$1~");
+  // a held span can hold another (bold around code), so restore until settled
+  for (let prev = ""; prev !== s; ) {
+    prev = s;
+    s = s.replace(/\u0000(\d+)\u0000/g, (m, n) => held[Number(n)]);
+  }
+  return s;
+}
+
+/** Whole Markdown document as Slack mrkdwn. A fenced block loses its info
+ *  string — Slack would print the language as the first line of code — and a
+ *  table becomes a code block, the only monospaced surface Slack has. */
+function slackMrkdwn(text) {
+  const lines = String(text ?? "").split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^```(\S*)\s*$/);
+    if (fence) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      i++; // closing fence
+      // A Slack code block renders its content literally: escaping here would
+      // paste "&lt;" where the code said "<".
+      out.push("```\n" + buf.join("\n") + "\n```");
+      continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)/);
+    if (h) {
+      // Slack has no headings and no nested formatting: bold is the only
+      // emphasis it honours, so the heading's own emphasis is dropped rather
+      // than pasted as a literal `*Title _here_*`.
+      const text = h[2]
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/(^|\W)\*([^*\s][^*]*)\*/g, "$1$2");
+      out.push(`*${slackInline(text).trim()}*`);
+      i++;
+      continue;
+    }
+    const li = line.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+    if (li) {
+      out.push(`${li[1]}${/\d/.test(li[2]) ? li[2] : "•"} ${slackInline(li[3])}`);
+      i++;
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        buf.push(`> ${slackInline(lines[i].replace(/^\s*>\s?/, ""))}`);
+        i++;
+      }
+      out.push(buf.join("\n"));
+      continue;
+    }
+    if (isTableStart(lines, i)) {
+      const splitRow = (row) => {
+        let t = row.trim();
+        if (t.startsWith("|")) t = t.slice(1);
+        if (t.endsWith("|") && !t.endsWith("\\|")) t = t.slice(0, -1);
+        return t.split(/(?<!\\)\|/).map((c) => slackCellText(c.trim().replace(/\\\|/g, "|")));
+      };
+      const head = splitRow(lines[i]);
+      i += 2; // header + separator row
+      const rows = [];
+      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|")) rows.push(splitRow(lines[i++]));
+      const widths = head.map((c, k) => Math.max(cellWidth(c), ...rows.map((r) => cellWidth(r[k] ?? ""))));
+      const row = (cells) =>
+        cells
+          .map((c, k) => c + " ".repeat(Math.max(0, widths[k] - cellWidth(c))))
+          .join(" | ")
+          .replace(/\s+$/, "");
+      out.push("```\n" + [head, ...rows].map(row).join("\n") + "\n```");
+      continue;
+    }
+    if (line.trim() === "") {
+      out.push("");
+      i++;
+      continue;
+    }
+    // A paragraph keeps its own line breaks: Slack shows them, and collapsing
+    // them would reflow text the writer deliberately broke.
+    out.push(slackInline(line));
+    i++;
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 /** One contiguous run of list lines, as nested `<ul>`/`<ol>`.
  *
  *  Indentation is the only nesting signal Markdown gives, and flattening it
@@ -550,6 +687,18 @@ async function copyRichText(source) {
     } catch {
       return false;
     }
+  }
+}
+
+/** Copy a document as Slack mrkdwn text. Plain text only on purpose: Slack
+ *  reads text/plain, and handing it the rich HTML flavour pastes the rendered
+ *  document instead of mrkdwn, which is what this button exists to avoid. */
+async function copySlackText(source) {
+  try {
+    await navigator.clipboard.writeText(slackMrkdwn(source));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -2511,6 +2660,16 @@ function renderTurnActions(item, { followup = false } = {}) {
       { class: "turn-action", title: "Copy the answer as rich text (Markdown on the clipboard too)", onclick: () => copyTurn(item) },
       el("span", { class: "turn-action-icon", html: COPY_ICON }),
       el("span", { text: "Copy" })
+    ),
+    el(
+      "button",
+      {
+        class: "turn-action",
+        title: "Copy the answer as Slack mrkdwn — paste straight into a message",
+        onclick: () => copyTurnAsSlack(item),
+      },
+      el("span", { class: "turn-action-icon", html: SLACK_ICON }),
+      el("span", { text: "Slack" })
     )
   );
   return row;
@@ -2521,6 +2680,13 @@ async function copyTurn(item) {
   const text = answerTextOf(item);
   if (!text) return;
   toast((await copyRichText(text)) ? "copied as rich text" : "copy failed", "info");
+}
+
+/** Copy one turn's answer as Slack mrkdwn. */
+async function copyTurnAsSlack(item) {
+  const text = answerTextOf(item);
+  if (!text) return;
+  toast((await copySlackText(text)) ? "copied as Slack text" : "copy failed", "info");
 }
 
 function renderItem(item) {
@@ -3829,6 +3995,8 @@ const STAR_OUTLINE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentC
 /** a bookmark: keeping a summary is a save, not a star */
 const FOLLOWUP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4-6.5 4V5a1 1 0 0 1 1-1z"/></svg>`;
 const COPY_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H5.5A1.5 1.5 0 0 0 4 5.5v8A1.5 1.5 0 0 0 5.5 15"/></svg>`;
+/** a speech bubble: the Slack copy is the same answer shaped for a message */
+const SLACK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5a2.5 2.5 0 0 1-2.5 2.5H9l-4 3V6.5A2.5 2.5 0 0 1 7.5 4h10A2.5 2.5 0 0 1 20 6.5z"/></svg>`;
 const EDIT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4l10-10a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5 4 20z"/></svg>`;
 
 /** two-level display name, e.g. /home/me/work/pi-web -> "work/pi-web" */
@@ -4358,6 +4526,13 @@ function renderFollowup(rec) {
               toast((await copyRichText(rec.text)) ? "copied as rich text" : "copy failed", "info");
             },
           }, el("span", { class: "turn-action-icon", html: COPY_ICON }), el("span", { text: "Copy" })),
+          el("button", {
+            class: "turn-action",
+            title: "Copy as Slack mrkdwn — paste straight into a message",
+            onclick: async () => {
+              toast((await copySlackText(rec.text)) ? "copied as Slack text" : "copy failed", "info");
+            },
+          }, el("span", { class: "turn-action-icon", html: SLACK_ICON }), el("span", { text: "Slack" })),
           el("button", {
             class: "turn-action",
             title: "Edit the title and the summary text",
