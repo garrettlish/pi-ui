@@ -989,31 +989,49 @@ function capText(t) {
   return s.length > MAX_TOOL_TEXT ? `${s.slice(0, MAX_TOOL_TEXT)}\n… truncated (${s.length} chars total)` : s;
 }
 
-/** True when a tool response carries no image block but the result payload is
- *  only image metadata — the shape a file-reading tool returns for a picture
- *  it cannot inline ({content: "", totalLines: 0, fileSize: N}). In that case
- *  the popup can still show the picture by asking the server for the bytes at
- *  the path the call names. */
-function imageMetadataPath(call, result) {
+/** Why a `read` of a picture produced no image block, if it did not.
+ *
+ *  A picture normally comes back as an image block and renders from its bytes.
+ *  When it does not, the popup still knows the path the call named, and the
+ *  server can serve those bytes — but only for a result that genuinely read a
+ *  picture. Three text-only shapes qualify, and each says why there is no block:
+ *
+ *  - `metadata`  the tool reported only `{content: "", fileSize: N}`
+ *  - `truncated` the file was treated as text and its first line blew the byte
+ *                limit, so the tool refused to read it at all
+ *  - `omitted`   the tool saw the picture but could not inline it (too large to
+ *                resize, or an animated/unsupported variant)
+ *
+ *  Restricted to those shapes on purpose: a text result that merely sits next
+ *  to a path must never turn into an unrequested file fetch, and a `read` that
+ *  returned the file's actual text is not a picture to show.
+ *
+ *  Observed 2026-11-15: a `.jpg` whose bytes were base64 text hit `truncated`
+ *  and showed no image at all, which read as "JPEGs do not display" — the
+ *  format was never the variable, the *shape* of the result was. */
+function imageBlockAbsence(call, result) {
   if (!result || result.isError) return null;
   const content = result.content || [];
   if (content.some((b) => b && b.type === "image")) return null;
   const target = call.arguments?.path ?? call.arguments?.file_path ?? call.arguments?.file;
   if (typeof target !== "string" || !target.startsWith("/")) return null;
-  const text = content.map((b) => (b && b.type === "text" ? b.text : "")).join("").trim();
+  // the extension is the only hint here: nothing was sniffed, or it would have
+  // come back as a block
+  if (!/\.(png|jpe?g|gif|webp)$/i.test(target)) return null;
+  const text = content.map((b) => (b && b.type === "text" ? b.text : "")).join("\n").trim();
   if (!text) return null;
   let meta;
   try {
     meta = JSON.parse(text);
   } catch {
-    return null;
+    meta = null;
   }
-  // Only the empty-content metadata shape: a text result that happens to sit
-  // next to a path must never turn into an unrequested file fetch.
-  if (!meta || typeof meta !== "object") return null;
-  if (typeof meta.fileSize !== "number" || meta.content !== "") return null;
-  if (!/\.(png|jpe?g|gif|webp)$/i.test(target)) return null;
-  return target;
+  if (meta && typeof meta === "object" && typeof meta.fileSize === "number" && meta.content === "") {
+    return { path: target, reason: "metadata" };
+  }
+  if (result.details?.truncation && /^\[Line \d+ is /.test(text)) return { path: target, reason: "truncated" };
+  if (/^(Read image file \[|\[Image omitted:)/.test(text)) return { path: target, reason: "omitted" };
+  return null;
 }
 
 /** Full-window image viewer. Clicking a picture inside a tool popup must not
@@ -2148,11 +2166,17 @@ function buildToolcallBody(call, exec, result) {
   if (isSubagentRun(call, exec, result)) return buildSubagentBody(call, exec, result);
   const body = el("div", { class: "tc-body" });
   const diff = editDiffOf(call, result);
-  // A tool that read a picture and could only report its size is the common
-  // case worth leading with: show the image itself, above the JSON.
-  const imagePath = imageMetadataPath(call, result);
-  if (imagePath) {
-    body.append(imageResultSection("image", [`/api/image?path=${encodeURIComponent(imagePath)}`]));
+  // A tool that read a picture but could not inline it is the common case
+  // worth leading with: show the image itself, above the JSON. The note says
+  // which shape it was, so "no image block" never reads as "not a picture".
+  const missing = imageBlockAbsence(call, result);
+  if (missing) {
+    body.append(
+      imageResultSection(
+        missing.reason === "omitted" ? "image (not inlined by the tool)" : "image (served from its path)",
+        [`/api/image?path=${encodeURIComponent(missing.path)}`]
+      )
+    );
   }
 
   // edit calls lead with the colored diff — seeing what changed is the point
@@ -4792,8 +4816,37 @@ renderSearchResults(SEARCH_HINT[searchScope]);
 // ---------------------------------------------------------------------------
 // actions
 // ---------------------------------------------------------------------------
+/** True when two transcript items describe the same message, so a refresh that
+ *  rebuilt from the persisted branch does not also re-add the live copy of it.
+ *  The timestamp is the identity when both carry one — a live turn and its
+ *  persisted entry are the same message. Text is the fallback for a user turn
+ *  whose item has no timestamp yet. */
+function sameItemContent(a, b) {
+  if (!a || !b || a.kind !== b.kind) return false;
+  if (a.ts && b.ts && a.ts === b.ts) return true;
+  if (a.kind === "user") return a.text === b.text;
+  if (a.kind === "assistant") return !!a.ts && a.ts === b.ts;
+  return false;
+}
+
 async function refresh({ sessions = false, stats = true } = {}) {
   try {
+    // A refresh is a snapshot of the persisted branch, taken now but answered
+    // later. Every message that arrives while that round-trip is in flight has
+    // been painted by a live event and is NOT in this snapshot yet, so adopting
+    // it verbatim deletes those turns from the page. That was the "a prompt in
+    // an existing session never appears until you switch away and back" bug: a
+    // switch's refreshCachedView() refresh raced the prompt's own message_start,
+    // and the later refreshes rebuilt from a branch that still lacked it.
+    //
+    // The fix is to keep what the page appended while the snapshot was in
+    // flight. A monotonic counter marks the boundary: every render assigns the
+    // next value, and the rebuild compares against the value a refresh captured
+    // before it asked. `state.items` cannot serve as the boundary because
+    // message_end replaces a live item with a fresh object (dropping `_live`),
+    // so the item that most needs keeping is the one that looks least live.
+    const liveBefore = state.items;
+    const cut = liveSeq;
     const entriesRes = await cmd("get_entries");
     const entries = entriesRes.data?.entries || [];
     state.leafId = entriesRes.data?.leafId ?? null;
@@ -4810,7 +4863,20 @@ async function refresh({ sessions = false, stats = true } = {}) {
     }
     branch.reverse();
 
-    state.items = buildItemsFromEntries(branch);
+    const rebuilt = buildItemsFromEntries(branch);
+    // Carry over whatever the page appended after the snapshot was requested.
+    // An item whose message the snapshot already carries is skipped: the
+    // persisted copy is authoritative and adding both would duplicate the turn.
+    if (state.items === liveBefore) {
+      for (const it of liveBefore) {
+        if (!it.appendedAt || it.appendedAt <= cut) continue;
+        const dup =
+          (it.entry?.id && branch.some((e) => e.id === it.entry.id)) ||
+          rebuilt.some((r) => r.kind === it.kind && sameItemContent(r, it));
+        if (!dup) rebuilt.push(it);
+      }
+    }
+    state.items = rebuilt;
     // Executions map is live-run data; persisted results now cover it.
     state.executions.clear();
     // state.items now mirrors the persisted branch — live events appended
@@ -5023,6 +5089,15 @@ const SCROLL_CACHE_MAX = 20;
 // state.leafId, so a stashed leafId would under-count the branch until the
 // next full refresh folds them in.
 let entriesDirty = false;
+/** Monotonic counter identifying when an item was appended to the transcript.
+ *
+ *  `refresh()` needs to know which items the page gained while its `get_entries`
+ *  snapshot was in flight, so it does not adopt a stale branch and delete them.
+ *  A counter rather than a `_live` flag because `message_end` replaces a live
+ *  item with a fresh object — the turn most likely to be lost mid-refresh is the
+ *  one that has already completed and lost its flag. Zero means "built from
+ *  persisted entries", i.e. always older than any refresh in flight. */
+let liveSeq = 0;
 
 /** Remember where this session's transcript was scrolled to. Called before
  *  leaving a session, so returning to it lands on the same line. */
@@ -5081,7 +5156,14 @@ async function refreshCachedView(file) {
       if (extendsBranch(entries, cached.leafId, leafId)) {
         state.leafId = leafId;
         cached.leafId = leafId;
-        if (entries.length) state.items.push(...buildItemsFromEntries(entries));
+        if (entries.length) {
+          const built = buildItemsFromEntries(entries);
+          // appending persisted entries does not make them "live", but they do
+          // land on the page now: a refresh snapshot that started before this
+          // point must not discard them.
+          for (const it of built) it.appendedAt = ++liveSeq;
+          state.items.push(...built);
+        }
         await refreshMeta();
         renderHeader();
         renderStatus();
@@ -5359,10 +5441,11 @@ function handleEvent(record) {
       if (m.role === "user") {
         for (const it of buildItemsFromEntries([{ type: "message", message: m }])) {
           it._live = true;
+          it.appendedAt = ++liveSeq;
           state.items.push(it);
         }
       } else if (m.role === "assistant") {
-        const item = { kind: "assistant", blocks: [], streaming: true, meta: null, ts: m.timestamp, _live: true };
+        const item = { kind: "assistant", blocks: [], streaming: true, meta: null, ts: m.timestamp, _live: true, appendedAt: ++liveSeq };
         state.items.push(item);
         currentAssistant = item;
       } else if (m.role === "toolResult") {
@@ -5376,6 +5459,7 @@ function handleEvent(record) {
       } else {
         for (const it of buildItemsFromEntries([{ type: "message", message: m }])) {
           it._live = true;
+          it.appendedAt = ++liveSeq;
           state.items.push(it);
         }
       }
@@ -5436,6 +5520,9 @@ function handleEvent(record) {
         const built = { kind: "assistant", blocks: blocksOf(m), meta: assistantMeta(m), streaming: false, ts: m.timestamp, _rawMessage: m };
         if (item) {
           const i = state.items.indexOf(item);
+          // inherit the live sequence number: this object is the same turn, and
+          // a refresh in flight must still see it as appended-after-the-snapshot
+          built.appendedAt = item.appendedAt;
           state.items[i] = built;
           // The new item is not streaming, so the next render replaces this
           // node's plain text with real Markdown — reuse the element as the
@@ -5443,6 +5530,7 @@ function handleEvent(record) {
           built.node = item.node;
           built.dirty = true;
         } else {
+          built.appendedAt = ++liveSeq;
           state.items.push(built);
         }
         currentAssistant = null;
@@ -5456,7 +5544,7 @@ function handleEvent(record) {
           const exists = state.items.some(
             (it) => it.kind === "toolResultOrphan" && (it.message?.toolCallId || it.message?.timestamp) === key
           );
-          if (!exists) state.items.push({ kind: "toolResultOrphan", message: m, ts: m.timestamp, _live: true });
+          if (!exists) state.items.push({ kind: "toolResultOrphan", message: m, ts: m.timestamp, _live: true, appendedAt: ++liveSeq });
         }
       } else {
         // replace the tentative live item pushed by message_start
@@ -5489,9 +5577,13 @@ function handleEvent(record) {
           }
         }
         if (idx >= 0) {
+          // the merge keeps the item's live sequence number, so a prompt that
+          // arrived while a refresh was in flight survives that refresh
+          built.appendedAt = state.items[idx].appendedAt;
           built.node = state.items[idx].node;
           state.items.splice(idx, 1, built);
         } else {
+          built.appendedAt = ++liveSeq;
           state.items.push(built);
         }
       }

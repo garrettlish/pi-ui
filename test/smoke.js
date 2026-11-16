@@ -912,6 +912,22 @@ try {
   const appJs = await (await fetch(`${BASE}/app.js`)).text();
   check("app.js parses file: links", appJs.includes('a class="local-link"'));
   check("app.js turns a local-link click into a copy", appJs.includes('closest?.("a.local-link")'));
+
+  // A refresh() snapshots the persisted branch and adopts it wholesale. Anything
+  // a live event painted while that get_entries round-trip was in flight is
+  // absent from the snapshot, so adopting it deleted the turn from the page —
+  // the "a prompt in an existing session never appears until you switch away and
+  // back" report. The transcript has to remember what it appended, and refresh
+  // has to carry those items past the rebuild.
+  check("app.js stamps when an item reached the transcript", appJs.includes("let liveSeq = 0"));
+  check(
+    "app.js keeps what arrived while a refresh was in flight",
+    /const cut = liveSeq;[\s\S]{0,1600}it\.appendedAt <= cut[\s\S]{0,300}rebuilt\.push\(it\)/.test(appJs)
+  );
+  check(
+    "message_end keeps a turn's place in that boundary",
+    /built\.appendedAt = item\.appendedAt;/.test(appJs)
+  );
   const css = await (await fetch(`${BASE}/style.css`)).text();
   check("style.css gives rendered links a palette color", css.includes(".assistant-text a {"));
 
@@ -953,6 +969,21 @@ try {
     !/data:\$\{img\.mimeType\};base64,\$\{img\.data\}/.test(appJs)
   );
   check("app.js shares one fetch per offloaded image", appJs.includes("const imageBlockPending = new Map()"));
+
+  // A picture only reaches the popup as an image *block* when the tool inlined
+  // it. When it did not, three text shapes are still a picture the popup can
+  // serve from its path: the metadata stub, a first-line-too-long truncation
+  // notice, and an "omitted" note. Only the metadata shape was recognised, so a
+  // screenshot refused for its byte size showed no image at all — reported as
+  // "JPEGs do not display", when the format was never the variable.
+  check(
+    "app.js recognises every text-only image result shape",
+    /function imageBlockAbsence\(call, result\)[\s\S]{0,2000}reason: "metadata"[\s\S]{0,400}reason: "truncated"[\s\S]{0,300}reason: "omitted"/.test(appJs)
+  );
+  check(
+    "app.js leads a text-only image result with the picture",
+    /const missing = imageBlockAbsence\(call, result\);[\s\S]{0,400}imageResultSection\(/.test(appJs)
+  );
 
   // The first paint cannot wait for app.js, so index.html decides the palette
   // inline — and it has to agree with firstVisitTheme(), or a dark desktop gets
