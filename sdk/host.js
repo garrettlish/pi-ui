@@ -47,6 +47,13 @@ const IDLE_REAP_MS = 30 * 60 * 1000;
 /** What `session.prompt()` reports for an accepted prompt, in the RPC shape. */
 const PROMPT_DISPOSITIONS = new Set(["started", "queued", "handled"]);
 
+/** How long `bindExtensions` may hold up a session's creation. An extension that
+ *  asks a question on `session_start` leaves the bind promise unsettled until it
+ *  is answered; without a bound, `/api/open` waits forever. Long enough for the
+ *  ordinary extension startup measured in this repo (~0.8 s cold, ~0 ms warm). */
+const BIND_DEADLINE_MS = 15000;
+const BIND_DEADLINE = Symbol("bind-deadline");
+
 /**
  * One open session: an `AgentSession` plus the browser bookkeeping the RPC bridge kept
  * on its subprocess (queue snapshot, leftover background processes, clients).
@@ -111,13 +118,45 @@ class Session {
    *  session is replaced by new/fork/switch. */
   async bind() {
     const ui = this.#extensionBindings();
+    // Subscribe BEFORE binding: `bindExtensions` fires `session_start`, and a
+    // handler that blocks on a question must not also hold back the session's
+    // own event stream.
+    this.observe();
     try {
-      await this.session.bindExtensions(ui);
+      await this.#awaitBind(ui);
     } catch (err) {
       // An extension failing to bind must not make the session unusable.
       this.broadcast({ type: "server", event: "extension_bind_error", error: err.message });
     }
-    this.observe();
+  }
+
+  /** `bindExtensions`, bounded.
+   *
+   *  A handler on `session_start` may ask a question (`ctx.ui.select` in a trust
+   *  or permission gate), and the bind promise does not settle until it is
+   *  answered. Unbounded, that makes `/api/open` wait for a user who may never
+   *  see the prompt — and `ask_user_question`-shaped calls pass no timeout, so
+   *  the request would hang forever. The question itself is still delivered (the
+   *  client key is set before the session is created); this only stops the
+   *  session's *creation* from waiting on it, and says so on the page. */
+  async #awaitBind(ui) {
+    let timer = null;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(BIND_DEADLINE), BIND_DEADLINE_MS);
+      timer.unref?.();
+    });
+    try {
+      const outcome = await Promise.race([this.session.bindExtensions(ui), deadline]);
+      if (outcome === BIND_DEADLINE) {
+        this.broadcast({
+          type: "server",
+          event: "extension_bind_error",
+          error: `extensions are still starting after ${Math.round(BIND_DEADLINE_MS / 1000)}s — an extension is waiting for an answer`,
+        });
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** (Re)attach the single guarded event listener. */
@@ -196,6 +235,27 @@ class Session {
       res.write(`data: ${JSON.stringify({ type: "queue_update", steering, followUp })}\n\n`);
     } catch {
       // client is gone; the close handler cleans up
+    }
+  }
+
+  /** Replay dialogs this session is still waiting on.
+   *
+   *  A question asked while no tab was attached reached nobody, and the
+   *  extension is blocked on it — `ask_user_question` and permission gates pass
+   *  no timeout, so it never resolves by itself. Sending the pending records on
+   *  attach (and on open) is the only way the user can answer them.
+   *
+   *  The same record is sent to every attached tab: two windows on one session
+   *  is a supported arrangement, and whichever answers first wins (the loser's
+   *  answer is dropped by `ExtensionUi.answer` returning false). */
+  sendPendingDialogs(res) {
+    for (const record of this.ui.snapshot()) {
+      try {
+        res.write(`data: ${JSON.stringify(record)}\n\n`);
+      } catch {
+        // client is gone; the close handler cleans up
+        return;
+      }
     }
   }
 
@@ -432,13 +492,28 @@ export class SessionHost {
 
     let session = this.sessions.get(key);
     if (!session) {
-      session = await this.#create({ key, cwd: workdir, file });
-      this.sessions.set(key, session);
-      if (file) this.fileAlias.set(file, key);
+      // The client's key is assigned BEFORE the session is created, because
+      // `#create()` binds extensions and `bindExtensions` fires `session_start`
+      // — where a permission gate or trust prompt may call `ui.select()`. Every
+      // extension-UI record fans out through `broadcast()` → `clientsOn(key)`,
+      // which matches on `c.key`; with the key set afterwards nothing matches,
+      // the question reaches no tab, and `/api/open` blocks until the dialog's
+      // own timeout (or forever, for the no-timeout shape `ask_user_question`
+      // uses). `#create()` registers the session before it binds, so the answer
+      // route can find it too. Rolled back on failure so a broken cwd does not
+      // leave the tab pointing at a session that was never created.
+      c.key = key;
+      try {
+        session = await this.#create({ key, cwd: workdir, file });
+      } catch (err) {
+        c.key = null;
+        throw err;
+      }
+    } else {
+      c.key = key;
     }
     this.learnSessionFile(session);
 
-    c.key = key;
     session.lastActivity = Date.now();
     // The attach handshake (hello, queue snapshot, leftover processes) lives in
     // the server's openSession(), which owns the SSE response. Repeating it here
@@ -473,7 +548,25 @@ export class SessionHost {
       sessionManager: manager,
     });
     const host = new Session(this, key, { cwd, sessionFile: file, session });
-    await host.bind();
+    // Register BEFORE binding. `bind()` fires `session_start`, where an extension
+    // may ask a question; the answer arrives at `/api/ui-response`, which finds
+    // the session through `sessionForClient()` → `this.sessions`. Unregistered,
+    // that lookup returns null and the route answers 503 "no session — open one
+    // first", so the dialog could be delivered but never answered, and `open()`
+    // would wait out the bind bound. The client's own key is already set by the
+    // caller, so fan-out reaches its tab from the first record.
+    this.sessions.set(key, host);
+    if (file) this.fileAlias.set(file, key);
+    try {
+      await host.bind();
+    } catch (err) {
+      // `bind()` swallows extension errors itself, so this is a genuine failure
+      // to start the session: drop the half-built entry rather than leave a
+      // session nobody can use occupying the slot.
+      this.sessions.delete(key);
+      if (file) this.fileAlias.delete(file);
+      throw err;
+    }
     return host;
   }
 

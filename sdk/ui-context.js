@@ -43,7 +43,11 @@ export class ExtensionUi {
   /** @param {(record: object) => void} emit send one record to attached clients */
   constructor(emit) {
     this.emit = emit;
-    this.pending = new Map(); // id -> { resolve, timer }
+    this.pending = new Map(); // id -> { resolve, timer, record }
+    /** Ids answered in the last while, so a duplicate response is not reported as
+     *  "belongs to another session". A Set keeps insertion order, so the oldest
+     *  id is the one evicted. */
+    this.answered = new Set();
     this.theme = plainTheme();
   }
 
@@ -58,7 +62,27 @@ export class ExtensionUi {
     } catch {
       // a rejecting consumer must not break the response path
     }
+    this.answered.add(id);
+    if (this.answered.size > 200) this.answered.delete(this.answered.values().next().value);
     return true;
+  }
+
+  /** Whether this id named a dialog that has already been answered. Used to tell
+   *  "a retry of an accepted answer" apart from "a dialog of another session",
+   *  which the caller reports to the browser. */
+  wasAnswered(id) {
+    return this.answered.has(id);
+  }
+
+  /** Requests still waiting for an answer, in the shape they were emitted in.
+   *
+   *  A tab that attaches *after* a question was asked never saw it: the request
+   *  went out while `clientsOn(key)` matched nothing, and the extension is
+   *  blocked until somebody answers. Replaying the records on attach is the only
+   *  way back — `ask_user_question` and any permission gate call `select()` with
+   *  no timeout, so the caller waits forever otherwise. */
+  snapshot() {
+    return [...this.pending.values()].map((p) => p.record).filter(Boolean);
   }
 
   /** Drop dialogs nobody will answer (session closing, browser gone). */
@@ -97,9 +121,11 @@ export class ExtensionUi {
       timer = opts?.timeout ? setTimeout(() => finish(defaultValue), opts.timeout) : null;
       opts?.signal?.addEventListener?.("abort", onAbort, { once: true });
       // The map holds the raw-answer resolver; its answer is parsed into the
-      // API's return type before it resolves the caller.
+      // API's return type before it resolves the caller. The record is kept so
+      // a tab that attaches later can be shown the question again.
       this.pending.set(id, {
         timer,
+        record: { type: "extension_ui_request", id, ...request.record },
         resolve: (payload) => finish(request.parse(payload || {})),
       });
       this.emit({ type: "extension_ui_request", id, ...request.record });

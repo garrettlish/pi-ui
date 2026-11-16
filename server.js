@@ -286,6 +286,10 @@ async function openSession({ client, sessionFile, cwd }) {
       }
       session.sendQueueSnapshot(attached.res);
       sendProcessSnapshot(session, attached.res);
+      // A dialog raised during extension bind (session_start) or while this tab
+      // was showing another session reached no tab. Replay it now, or the
+      // extension stays blocked with nothing on screen to answer.
+      session.sendPendingDialogs(attached.res);
     }
   }
   return opened;
@@ -1877,11 +1881,13 @@ const server = http.createServer(async (req, res) => {
       c.res = res;
       c.detachedAt = 0;
       // a reconnected stream (page reload) missed every queue_update since the
-      // session started holding messages — replay the current queue now
+      // session started holding messages — replay the current queue now, along
+      // with any dialog still waiting for an answer
       const attached = c.key ? sessionHost?.sessions.get(c.key) : null;
       if (attached) {
         attached.sendQueueSnapshot(res);
         sendProcessSnapshot(attached, res);
+        attached.sendPendingDialogs(res);
       }
       req.on("close", () => {
         if (c.res !== res) return;
@@ -1962,10 +1968,15 @@ const server = http.createServer(async (req, res) => {
       }
       // `client` routes the response; the extension UI only needs the id.
       const { client: _client, ...rest } = body;
-      // An unknown id is not an error: a client may answer a dialog that already
-      // timed out, and the answer is simply dropped.
-      session.ui.answer(rest.id, rest);
-      sendJson(res, 200, { ok: true });
+      // Answering a dialog this tab's CURRENT session does not own is a real
+      // failure, not a no-op: the browser keeps the overlay from the session the
+      // user was looking at, so switching away and pressing a button here used
+      // to report ok:true while the asking session stayed blocked forever.
+      // A genuinely unknown id (a dialog that already timed out) is still not an
+      // error — that is the retry case, and the answer is simply dropped.
+      const answered = session.ui.answer(rest.id, rest);
+      const known = answered || session.ui.wasAnswered(rest.id);
+      sendJson(res, known ? 200 : 409, known ? { ok: true } : { error: "that question belongs to another session" });
       return;
     }
 

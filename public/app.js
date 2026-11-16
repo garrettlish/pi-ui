@@ -5401,6 +5401,9 @@ async function switchSession(file, cwd) {
   // in its own pi process on the server and can be re-attached anytime.
   state.sessionFile = file;
   state.executions.clear();
+  // a question belongs to the session that asked it; leaving it on screen over
+  // another conversation is how an answer got routed to the wrong session
+  clearDialogs();
   // queue chips belong to the previous session's process — leaving them set
   // would keep showing the old session's queued messages after a switch. The
   // server re-sends this session's queue once the tab re-attaches.
@@ -5471,6 +5474,11 @@ async function newSession() {
     const cwd = state.workspace || state.cwd;
     rememberScroll(); // the session being left keeps its offset
     stashCurrentView();
+    // Same reason as switchSession: this tab is about to point at a new session,
+    // so the previous one's question must not stay in front of it — answering
+    // there would be routed to the new session and refused (or worse, before
+    // the routing fix, silently dropped while the old session stayed blocked).
+    clearDialogs();
     const resp = await api("/api/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5974,27 +5982,87 @@ async function restartPi() {
 // ---------------------------------------------------------------------------
 // extension UI dialogs
 // ---------------------------------------------------------------------------
+// A queue, not one slot. Two sessions can ask at the same time (or one question
+// can arrive while another is still open), and the earlier version overwrote
+// the overlay in place — the displaced question then had no button anywhere and
+// its session stayed blocked with no visible cause. Each record is shown in
+// turn; the answer carries its own id, so routing no longer depends on which
+// session this tab happens to be showing.
+const dialogQueue = [];
+let dialogOpen = null;
+
 function handleExtensionUI(record) {
   if (!["select", "confirm", "input", "editor"].includes(record.method)) {
     if (record.method === "notify") toast(record.message || "", record.notifyType || "info", 6000);
     return;
   }
+  // The same record can arrive twice: once live and once in the replay a tab
+  // gets on attach. Showing it twice would open a dialog whose answer is
+  // already settled, so drop a repeat of one that is queued or on screen.
+  if (dialogOpen?.id === record.id || dialogQueue.some((r) => r.id === record.id)) return;
+  dialogQueue.push(record);
+  if (!dialogOpen) showNextDialog();
+}
+
+function showNextDialog() {
+  const record = dialogQueue.shift() || null;
+  dialogOpen = record;
   const overlay = $("#dialog-overlay");
+  if (!record) {
+    overlay.classList.add("hidden");
+    return;
+  }
   const title = $("#dialog-title");
   const body = $("#dialog-body");
   const hint = $("#dialog-hint");
+  const cancel = $("#dialog-cancel");
   title.textContent = record.title || record.method;
-  hint.textContent = record.timeout ? `auto-resolves in ${Math.round(record.timeout / 1000)}s` : "";
+  hint.textContent = [
+    record.timeout ? `auto-resolves in ${Math.round(record.timeout / 1000)}s` : "",
+    dialogQueue.length ? `${dialogQueue.length} more waiting` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
-  const send = (payload) => {
+  let settled = false;
+  const send = async (payload) => {
+    if (settled) return;
+    settled = true;
     overlay.classList.add("hidden");
-    fetch("/api/ui-response", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ client: CLIENT_ID, id: record.id, ...payload }),
-    }).catch((err) => toast(`dialog response failed: ${err.message}`, "error"));
+    let res;
+    try {
+      res = await fetch("/api/ui-response", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client: CLIENT_ID, id: record.id, ...payload }),
+      });
+    } catch (err) {
+      toast(`dialog response failed: ${err.message}`, "error");
+      settled = false;
+      overlay.classList.remove("hidden");
+      return;
+    }
+    // The server routes by client, so a tab that switched sessions between the
+    // question and the answer used to be told "ok" while the asking session
+    // stayed blocked. It now refuses, and the dialog returns to the queue so it
+    // can be answered after switching back.
+    if (!res.ok) {
+      let detail = "";
+      try {
+        detail = (await res.json()).error || "";
+      } catch {
+        // a non-JSON body adds nothing
+      }
+      toast(detail || `dialog response failed: HTTP ${res.status}`, "error", 8000);
+      settled = false;
+      dialogQueue.unshift(record);
+      dialogOpen = null;
+      overlay.classList.add("hidden");
+      return;
+    }
+    showNextDialog();
   };
-  $("#dialog-cancel").onclick = () => send({ cancelled: true });
+  cancel.onclick = () => send({ cancelled: true });
 
   body.innerHTML = "";
   if (record.method === "select") {
@@ -6022,6 +6090,18 @@ function handleExtensionUI(record) {
     setTimeout(() => inp.focus(), 30);
   }
   overlay.classList.remove("hidden");
+}
+
+/** Drop every dialog this tab is showing or holding.
+ *
+ *  A question belongs to the session that asked it, and the overlay would
+ *  otherwise sit in front of a different conversation with no context. The
+ *  server keeps the request pending and replays it when the tab attaches back,
+ *  so nothing is lost by clearing here. */
+function clearDialogs() {
+  dialogQueue.length = 0;
+  dialogOpen = null;
+  $("#dialog-overlay").classList.add("hidden");
 }
 
 // ---------------------------------------------------------------------------

@@ -766,6 +766,25 @@ async function extensionUiChecks() {
 
   check("an unknown dialog id is refused, not crashed on", ui.answer("no-such-id", { value: "z" }) === false);
 
+  // A question asked while no tab is attached is still pending when one comes
+  // back. ask_user_question and every permission gate call select() with no
+  // timeout, so without a replay the caller blocks until the server restarts.
+  const stranded = ctx.select("Stranded", ["a", "b"]);
+  await settle();
+  const strandedReq = emitted.filter((e) => e.method === "select").at(-1);
+  const snap = ui.snapshot();
+  check("a pending dialog is included in the replay snapshot", snap.some((r) => r.id === strandedReq.id && r.method === "select"), JSON.stringify(snap));
+  check("the snapshot carries the options the browser needs", (snap.find((r) => r.id === strandedReq.id)?.options || []).join(",") === "a,b");
+  ui.answer(strandedReq.id, { value: "b" });
+  check("a replayed dialog is still answerable by id", (await stranded) === "b");
+  check("an answered dialog leaves the replay snapshot", !ui.snapshot().some((r) => r.id === strandedReq.id));
+
+  // Answering is reported truthfully: the route tells "already answered" (a
+  // retry) apart from "never seen here" (another session's dialog), because a
+  // silent ok:true left the asking session blocked with nothing on screen.
+  check("an answered id is remembered as answered", ui.wasAnswered(strandedReq.id) === true);
+  check("an id this session never had is not reported as answered", ui.wasAnswered("no-such-id") === false);
+
   ctx.notify("hello", "info");
   ctx.setStatus("k", "v");
   check("notify and setStatus are emitted to the browser", emitted.some((e) => e.method === "notify") && emitted.some((e) => e.method === "setStatus"));
@@ -1013,6 +1032,23 @@ try {
   check("app.js renders the Follow-up control as a toggle", appJs.includes('class: `turn-action followup-toggle'));
   check("app.js un-keeps a follow-up on a second press", appJs.includes("async function unsaveFollowup"));
   check("style.css paints the pressed Follow-up control", css.includes(".turn-action.kept {"));
+
+  // The extension dialog used to be one slot: two sessions asking at once meant
+  // the second record overwrote the first on screen, and the displaced question
+  // had no button anywhere — its session blocked with nothing to see. It is a
+  // queue now, and a refused answer goes back into it instead of vanishing.
+  check("app.js queues extension dialogs instead of overwriting one slot", appJs.includes("const dialogQueue = [];"));
+  check("a second dialog waits its turn", /dialogQueue\.push\(record\)[\s\S]{0,120}if \(!dialogOpen\) showNextDialog\(\)/.test(appJs));
+  check("the waiting count is shown to the user", appJs.includes("dialogQueue.length ? `${dialogQueue.length} more waiting`"));
+  check("a refused answer returns the dialog to the queue", /dialogQueue\.unshift\(record\)/.test(appJs));
+  check("switching sessions drops the previous session's overlays", appJs.includes("function clearDialogs()"));
+  // Both ways a tab can point at a different session must clear the overlay: a
+  // sidebar switch AND "new session". Leaving it up over the new conversation is
+  // how an answer got routed at the wrong session.
+  check(
+    "both switch and new-session clear the dialog overlay",
+    (appJs.match(/clearDialogs\(\);/g) || []).length >= 2 && /async function newSession\(\)[\s\S]{0,900}clearDialogs\(\);/.test(appJs)
+  );
 
   // Copying a summary used to offer only the rich flavour, which a Slack
   // message box drops: it pastes the rendered HTML or the raw Markdown, and
