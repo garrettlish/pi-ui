@@ -979,11 +979,56 @@ try {
   check("app.js clears it when the run settles", /case "agent_settled":[\s\S]{0,200}state\.lastActivityAt = null/.test(appJs));
   check(
     "the status line names a silent provider",
-    appJs.includes("no response for ${fmtElapsed(silent)}") && /state\.lastActivityAt != null[\s\S]{0,520}STALL_FIRST_TOKEN_MS/.test(appJs)
+    appJs.includes("No response for ${fmtElapsed(silent)}") && /state\.lastActivityAt != null[\s\S]{0,900}STALL_FIRST_TOKEN_MS/.test(appJs)
   );
+  // Folded into the grey "pi is working…" sentence, the warning carried the same
+  // size and colour as the sentence around it and went unnoticed. It is now its
+  // own row in the dock, tinted danger, and the bar itself switches state.
+  check("the dock has a dedicated alert row", html.includes('id="status-alert"'));
+  check("the alert row is a sibling of the status bar, so it can wrap", /<\/div>\s*<!--[\s\S]{0,400}?<div id="status-alert"/.test(html) && !/id="status-bar"[^>]*>[\s\S]{0,200}id="status-alert"/.test(html));
+  check("the alert row announces itself to assistive tech", /id="status-alert"[^>]*role="status"/.test(html));
+  // A window, not a character count: the threshold checks between the two
+  // mentions are what decide whether the warning fires at all.
+  check(
+    "a warning is painted on that row, not appended to the sentence",
+    /let warning = ""[\s\S]{0,2500}alert\.textContent = warning/.test(appJs) &&
+      !/text \+= ` · no response for/.test(appJs)
+  );
+  check("the bar enters an alerting state while the warning shows", /alert\.classList\.toggle\("hidden", !warning\)[\s\S]{0,120}bar\.classList\.toggle\("alerting"/.test(appJs));
+  check("the alerting state is dropped when the run settles", /bar\.classList\.remove\("alerting"\)/.test(appJs));
+  check(
+    "style.css tints the alert row and lets it wrap",
+    /#status-alert \{[\s\S]{0,400}background: var\(--danger-tint\)[\s\S]{0,400}white-space: normal/.test(css)
+  );
+  check("style.css recolours the bar and stills its dot while alerting", css.includes("#status-bar.alerting {") && /#status-bar\.alerting::before \{[\s\S]{0,160}animation: none/.test(css));
   // The silent-provider case must not repaint the transcript: nothing in it is
   // aging, so the loop would pay a full render every 5s for no visible change.
   check("a waiting run repaints only the status bar", /elapsedTimer = setInterval[\s\S]{0,320}if \(running\) scheduleRender\(\)/.test(appJs));
+
+  // A dropped provider connection never errors, so a run could sit "streaming"
+  // forever on a socket the kernel already closed. The server aborts it once the
+  // silence passes a measured threshold, and says so on the event stream.
+  const hostJs = fs.readFileSync(new URL("../sdk/host.js", import.meta.url), "utf8");
+  check("host.js aborts a run whose provider went silent", hostJs.includes("reapStalled("));
+  check("host.js waits past the healthy-gap distribution before aborting", /STALL_ABORT_AFTER_MS = 5 \* 60 \* 1000/.test(hostJs));
+  // Reporting and aborting live on opposite sides, and the order is the point:
+  // the page names the silence long before the server gives up on it, so a run
+  // that recovers is never killed first. Assert the relationship, not the one
+  // number a reader could edit in isolation.
+  {
+    const evaluate = (expr) => expr.split("*").reduce((acc, part) => acc * Number(part.trim().replace(/_/g, "")), 1);
+    const abortMs = evaluate(/STALL_ABORT_AFTER_MS = ([^;]+)/.exec(hostJs)?.[1] ?? "0");
+    const reportMs = evaluate(/STALL_FIRST_TOKEN_MS = ([^;]+)/.exec(appJs)?.[1] ?? "0");
+    check("the page names the silence well before the server aborts", reportMs > 0 && abortMs >= reportMs * 3, `${reportMs} vs ${abortMs}`);
+  }
+  check("host.js reports the stall to the tab", hostJs.includes('event: "run_stalled"'));
+  // One dead run must produce one notice, and a failed abort must not leave the
+  // session permanently skipped by the sweeper.
+  check("the sweeper reports a dead run once", /if \(session\.stallAborted\) continue;/.test(hostJs));
+  check("a failed stall abort retries on the next sweep", /stall abort failed[\s\S]{0,300}session\.stallAborted = false/.test(hostJs));
+  check("a new run clears the previous stall verdict", /agent_start[\s\S]{0,300}this\.stallAborted = false/.test(hostJs));
+  check("the server sweeps for stalled runs", /setInterval\(\(\) => sessionHost\?\.reapStalled\(\)/.test(fs.readFileSync(new URL("../server.js", import.meta.url), "utf8")));
+  check("app.js surfaces a stalled run to the user", appJs.includes('record.event === "run_stalled"'));
 
   // Syntax highlighting: a fenced block with a known language is tokenized, an
   // unknown one stays plain rather than guessing, and an oversized block is
@@ -1094,10 +1139,15 @@ try {
   check("the dock reserves a row container for leftover processes", html.includes('id="process-bar"'));
   check("app.js renders one dock row per leftover process", appJs.includes("function renderProcessBar"));
   check("app.js gives each dock row a Stop", appJs.includes('text: "Stop", title: `Stop ${p.pid}'));
-  // The window is generous because renderStatus now also composes the running-tool
-  // line and the silent-provider line, which lengthened the function; the
-  // assertion still means the same thing.
-  check("app.js re-renders the dock rows with the status bar", /function renderStatus\(\)[\s\S]{0,1600}renderProcessBar\(\)/.test(appJs));
+  // Assert the *body* of renderStatus rather than a character budget: a fixed
+  // window broke twice as unrelated lines were added above it. Take everything
+  // up to the next top-level function instead.
+  const renderStatusBody = (appJs.match(/function renderStatus\(\) \{[\s\S]*?\n\}/) || [""])[0];
+  check(
+    "app.js re-renders the dock rows with the status bar",
+    renderStatusBody.includes("renderProcessBar()") && renderStatusBody.includes("#queue-bar"),
+    `${renderStatusBody.length} chars`
+  );
   check("opening the resources panel acknowledges the badge", /function setResourcesOpen\(open\)[\s\S]{0,900}acknowledgeProcesses\(\)/.test(appJs));
 
   // Streaming must not parse Markdown per delta: it paints literal text into one

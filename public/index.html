@@ -160,6 +160,11 @@
           <span class="spacer"></span>
           <button id="btn-abort" class="danger hidden" title="Abort (Esc)">Stop</button>
         </div>
+        <!-- A failure state on its own row, not the tail of the sentence above:
+             folded in, it carried the same size and colour as "pi is working…"
+             and went unread. Its own line also lets the message wrap, so the
+             half that says what happens next is not ellipsised away. -->
+        <div id="status-alert" class="hidden" role="status"></div>
         <!-- leftovers from this session's bash calls: the same list the
              resources panel holds, where the reader is already looking -->
         <div id="process-bar" class="hidden"></div>

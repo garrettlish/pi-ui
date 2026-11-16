@@ -840,6 +840,31 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 }
 #status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
+/* A stuck or silent run. It used to be the tail of the grey status sentence,
+   which is why it went unnoticed: same 12px, same weight, same colour as "pi is
+   working…". It is now its own row in the danger tint, allowed to wrap, so the
+   half that says what happens next cannot be ellipsised away. */
+#status-alert {
+  margin: 8px 16px 0; padding: 6px 10px;
+  font-size: 12px; border-radius: var(--radius-sm);
+  color: var(--danger);
+  background: var(--danger-tint);
+  border: 1px solid var(--danger);
+  border-left-width: 3px;
+  font-weight: 600;
+  line-height: 1.45;
+  white-space: normal; overflow-wrap: anywhere;
+}
+#status-bar.alerting {
+  color: var(--text);
+  border-color: var(--danger);
+}
+/* the dot stops pulsing and turns red: a steady warning, not "still working" */
+#status-bar.alerting::before {
+  background: var(--danger);
+  animation: none;
+}
+
 /* A dead or unreachable server. This is the one failure the page cannot recover
    from by itself — every command goes through that process — so it is a banner
    in the composer dock rather than a line in the sidebar corner: it has to say

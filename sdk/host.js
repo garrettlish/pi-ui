@@ -44,6 +44,24 @@ import { ExtensionUi } from "./ui-context.js";
 /** Idle sessions with no attached browser are disposed after this long. */
 const IDLE_REAP_MS = 30 * 60 * 1000;
 
+/** When a silent run is aborted.
+ *
+ *  This is NOT a "the model is too slow" deadline and must not be read as one.
+ *  A turn can legitimately emit nothing for a long time — large prompts and
+ *  `reasoning_effort: high` have run for many minutes on this machine and then
+ *  completed. Measured over 37,872 event-to-event gaps in the session files
+ *  here, p99.5 of healthy gaps is 269 s, so five minutes sits past 99.5% of
+ *  everything a working run has ever done. The cost of a false positive is an
+ *  aborted turn the user must re-send, which is why this is deliberately the
+ *  conservative end rather than "just past p99".
+ *
+ *  Reporting comes first and is the frontend's job (`STALL_FIRST_TOKEN_MS`,
+ *  one minute): between the two thresholds the status line says the run has
+ *  gone quiet and nothing is aborted. The two numbers live on separate sides
+ *  on purpose — a tab that is closed can still be aborted, while only an open
+ *  tab can draw the line — and the smoke test asserts this one is the larger. */
+const STALL_ABORT_AFTER_MS = 5 * 60 * 1000;
+
 /** What `session.prompt()` reports for an accepted prompt, in the RPC shape. */
 const PROMPT_DISPOSITIONS = new Set(["started", "queued", "handled"]);
 
@@ -67,6 +85,10 @@ class Session {
     this.sessionFile = sessionFile || null;
     this.isStreaming = false;
     this.lastActivity = Date.now();
+    /** Set when the watchdog has already aborted this run for going silent, so
+     *  the sweeper reports it once rather than every pass. Cleared by the next
+     *  `agent_start`, and by a stall abort that failed to land. */
+    this.stallAborted = false;
     this.queued = { steering: [], followUp: [] };
     this.unsubscribe = null;
     this.ui = new ExtensionUi((record) => this.broadcast(record));
@@ -174,9 +196,12 @@ class Session {
 
   #onEvent(event) {
     this.lastActivity = Date.now();
-    if (event.type === "agent_start") this.isStreaming = true;
-    else if (event.type === "agent_settled" || event.type === "agent_end") this.isStreaming = false;
-
+    if (event.type === "agent_start") {
+      this.isStreaming = true;
+      // A new run starts clean: the previous run's stall verdict must not carry
+      // over and make the sweeper skip this one.
+      this.stallAborted = false;
+    } else if (event.type === "agent_settled" || event.type === "agent_end") this.isStreaming = false;
     // Queue state is only emitted on change, and `get_state` may not carry the
     // text, so keep the last snapshot for a tab that re-attaches mid-run.
     if (event.type === "queue_update") {
@@ -914,6 +939,60 @@ export class SessionHost {
       if (now - session.lastActivity < IDLE_REAP_MS) continue;
       console.log(`[pi-ui] disposing idle session (key=${key})`);
       this.#drop(key);
+    }
+  }
+
+  /**
+   * Abort a run whose provider connection has gone silent.
+   *
+   * ## Why a watchdog is needed at all
+   *
+   * A dropped provider connection does not fail: no error reaches the SDK, no
+   * `close` fires, and the request promise never settles. The process then sits
+   * at ~0% CPU waiting on a socket the kernel already marked CLOSED, and the run
+   * stays "streaming" forever. Observed in practice for twelve minutes, and
+   * across the session files on this machine eleven turns were still hanging
+   * with the oldest weeks old — the state never self-heals.
+   *
+   * ## Why it is not a plain deadline
+   *
+   * Silence alone does not distinguish a dead connection from a slow one, and a
+   * slow one is common here: 2.19% of 37,872 measured healthy gaps exceed 60 s,
+   * with p99 at 154 s. So the two jobs are split. The tab names the silence
+   * after a minute (`STALL_FIRST_TOKEN_MS` in public/app.js) and aborts nothing;
+   * this host aborts at STALL_ABORT_AFTER_MS, past 99.5% of every gap a working
+   * run has produced. A false positive costs one re-sent message, and only for a
+   * run that had already been silent for five minutes.
+   *
+   * Reporting goes through the ordinary event stream (`server` / `run_stalled`)
+   * so the tab shows why the turn stopped instead of freezing. The sweep only
+   * runs while a session is streaming, so the numbers above are the whole cost.
+   */
+  reapStalled(now = Date.now()) {
+    for (const [key, session] of this.sessions) {
+      if (!session.isStreaming) continue;
+      // Already aborted this run: one notice per dead run, not one per sweep.
+      if (session.stallAborted) continue;
+      const silentFor = now - session.lastActivity;
+      if (silentFor < STALL_ABORT_AFTER_MS) continue;
+      session.stallAborted = true;
+      const seconds = Math.round(silentFor / 1000);
+      console.error(`[pi-ui] run silent for ${seconds}s (key=${key}) — aborting`);
+      // Broadcast before the abort: once it lands the transcript shows an
+      // aborted turn with no reason, and the reason is the whole point.
+      session.broadcast({
+        type: "server",
+        event: "run_stalled",
+        silentForMs: silentFor,
+        message: `no response from the provider for ${seconds}s — the run was aborted. The connection may have dropped; send the message again to retry.`,
+      });
+      void session.session.abort().catch((err) => {
+        console.error("[pi-ui] stall abort failed:", err?.message || err);
+        // The abort did not land, so the run is still live as far as the SDK is
+        // concerned. Clear the verdict so the next sweep tries again instead of
+        // leaving the session streaming forever.
+        session.stallAborted = false;
+      });
     }
   }
 

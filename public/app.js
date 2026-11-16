@@ -3876,15 +3876,21 @@ function slowestRunningCall() {
 
 function renderStatus() {
   const bar = $("#status-bar");
+  const alert = $("#status-alert");
   if (state.isStreaming) {
     let text = state.isCompacting ? "compacting…" : "pi is working…";
+    // A failure state is painted on its own row rather than appended to the
+    // sentence above. Folded into the same grey line it reads as one more
+    // detail — the run looked identical whether the provider was thinking or
+    // had silently dropped the connection for twelve minutes.
+    let warning = "";
     // Name the running tool and how long it has been running: without this the
     // status line reads identically whether the model is thinking or a shell
     // command has been hung for the last three quarters of an hour.
     const slow = slowestRunningCall();
     if (slow) {
       text += ` · ${slow.toolName || "tool"} running ${fmtElapsed(slow.elapsed)}`;
-      if (slow.elapsed >= STALL_AFTER_MS) text += " — possibly stuck; Stop aborts it";
+      if (slow.elapsed >= STALL_AFTER_MS) warning = "This call looks stuck — Stop aborts it.";
     } else if (state.lastActivityAt != null) {
       // Nothing is running, so the run is between tool calls: waiting on the
       // provider. Name how long that has been silent once it crosses the
@@ -3893,12 +3899,22 @@ function renderStatus() {
       // because no tool is in flight.
       const silent = Date.now() - state.lastActivityAt;
       if (silent >= STALL_FIRST_TOKEN_MS) {
-        text += ` · no response for ${fmtElapsed(silent)} — the provider may have dropped the connection; Stop aborts it`;
+        // Say what will actually happen, not just that it is slow: the server
+        // aborts a silent run on its own (STALL_ABORT_AFTER_MS in sdk/host.js),
+        // so the user can also just wait instead of guessing.
+        warning = `No response for ${fmtElapsed(silent)} — the provider may have dropped the connection. It is aborted automatically if it stays silent; Stop aborts now.`;
       }
     }
     $("#status-text").textContent = text;
+    alert.textContent = warning;
+    alert.classList.toggle("hidden", !warning);
+    bar.classList.toggle("alerting", Boolean(warning));
     bar.classList.remove("hidden");
-  } else bar.classList.add("hidden");
+  } else {
+    bar.classList.add("hidden");
+    bar.classList.remove("alerting");
+    alert.classList.add("hidden");
+  }
   // the leftover-process rows sit beside the working line and outlive it: a
   // server a bash call started keeps running after the run ends
   renderProcessBar();
@@ -5628,6 +5644,15 @@ function handleEvent(record) {
       } else if (record.event === "hello") {
         $("#pi-status").textContent = "pi running";
         $("#pi-status").className = "pi-status ok";
+      } else if (record.event === "run_stalled") {
+        // The server gave up on a run whose provider went silent. Without this
+        // the turn simply stopped and the reason lived only in the server log.
+        // A toast names it and offers the retry, and the status line stops
+        // claiming work is happening — the abort event may arrive separately.
+        toast(record.message || "the run stalled and was aborted", "error", 8000);
+        state.isStreaming = false;
+        state.lastActivityAt = null;
+        renderStatus();
       } else if (record.event === "background_processes") {
         // the server watched these appear during a bash call and now reports
         // them (or that they stopped); mirror the list so the panel, the dock

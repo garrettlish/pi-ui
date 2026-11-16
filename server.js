@@ -298,6 +298,10 @@ async function openSession({ client, sessionFile, cwd }) {
 // Dispose sessions nobody is watching. A running session is left alone: the tab
 // may have closed while a long run continues, and re-attaching is the point.
 setInterval(() => sessionHost?.reapIdle(), 60000).unref();
+// Abort runs whose provider connection went silent. The sweep runs often because
+// a dead connection is otherwise indistinguishable from a slow one and the user
+// has no way out; the threshold itself (5 minutes) lives in the host.
+setInterval(() => sessionHost?.reapStalled(), 15000).unref();
 // A background process can exit on its own; without this the row would sit in
 // the dock until something re-read the list. Cheap: one signal-0 per recorded
 // pid, and it only broadcasts when the list actually shrank.
