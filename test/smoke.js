@@ -950,6 +950,22 @@ try {
   check("elapsed time keeps counting while a call is silent", appJs.includes("elapsedTimer = setInterval") && /elapsedTimer = setInterval[\s\S]{0,220}STALL_REPAINT_MS/.test(appJs));
   check("style.css marks a stalled call", css.includes(".tc-duration.stalled"));
 
+  // A provider that accepts the request and then returns nothing is a different
+  // failure from a hung tool: nothing is running, so the check above never fired
+  // and the bar read a flat "pi is working…" for twelve minutes. The run's last
+  // sign of life is stamped on every event and named once it goes quiet.
+  check("app.js thresholds a run that sends nothing back", /STALL_FIRST_TOKEN_MS = \d[\d_]*/.test(appJs));
+  check("app.js stamps a run's last sign of life", /function handleEvent\(record\)[\s\S]{0,300}state\.lastActivityAt = Date\.now\(\)/.test(appJs));
+  check("app.js starts that clock when the run starts", /case "agent_start":[\s\S]{0,300}state\.lastActivityAt = Date\.now\(\)/.test(appJs));
+  check("app.js clears it when the run settles", /case "agent_settled":[\s\S]{0,200}state\.lastActivityAt = null/.test(appJs));
+  check(
+    "the status line names a silent provider",
+    appJs.includes("no response for ${fmtElapsed(silent)}") && /state\.lastActivityAt != null[\s\S]{0,520}STALL_FIRST_TOKEN_MS/.test(appJs)
+  );
+  // The silent-provider case must not repaint the transcript: nothing in it is
+  // aging, so the loop would pay a full render every 5s for no visible change.
+  check("a waiting run repaints only the status bar", /elapsedTimer = setInterval[\s\S]{0,320}if \(running\) scheduleRender\(\)/.test(appJs));
+
   // Syntax highlighting: a fenced block with a known language is tokenized, an
   // unknown one stays plain rather than guessing, and an oversized block is
   // rendered plain so one paste cannot stall a render.
@@ -1027,8 +1043,9 @@ try {
   check("app.js renders one dock row per leftover process", appJs.includes("function renderProcessBar"));
   check("app.js gives each dock row a Stop", appJs.includes('text: "Stop", title: `Stop ${p.pid}'));
   // The window is generous because renderStatus now also composes the running-tool
-  // line, which lengthened the function; the assertion still means the same thing.
-  check("app.js re-renders the dock rows with the status bar", /function renderStatus\(\)[\s\S]{0,1200}renderProcessBar\(\)/.test(appJs));
+  // line and the silent-provider line, which lengthened the function; the
+  // assertion still means the same thing.
+  check("app.js re-renders the dock rows with the status bar", /function renderStatus\(\)[\s\S]{0,1600}renderProcessBar\(\)/.test(appJs));
   check("opening the resources panel acknowledges the badge", /function setResourcesOpen\(open\)[\s\S]{0,900}acknowledgeProcesses\(\)/.test(appJs));
 
   // Streaming must not parse Markdown per delta: it paints literal text into one

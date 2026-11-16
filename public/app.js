@@ -100,6 +100,12 @@ const state = {
   executions: new Map(), // toolCallId -> { status, updates[], result, isError, durationMs }
   isStreaming: false,
   isCompacting: false,
+  /** Date.now() of the last sign of life from the current run: the prompt going
+   *  out, or any event arriving for it. `null` when no run is in flight. The
+   *  status bar derives "waiting for a reply" from this, so a provider that
+   *  accepts the request and then sends nothing becomes visible instead of
+   *  looking like a slow model. */
+  lastActivityAt: null,
   sessionFile: null,
   sessionId: null,
   sessionName: null,
@@ -976,6 +982,14 @@ function runningFor(exec) {
  *  can exceed it, so the row says "slow or stuck" and points at Stop rather than
  *  claiming the run is dead. */
 const STALL_AFTER_MS = 120_000;
+/** A run that has asked the model for a reply and received nothing at all for
+ *  this long is reported in the status bar. This covers a failure mode the tool
+ *  deadline above cannot see: no tool is running, so `slowestRunningCall()` is
+ *  empty and the bar read a flat "pi is working…" while a turn sat for twelve
+ *  minutes waiting on a provider that had silently dropped the connection.
+ *  A reply can legitimately take a while (long reasoning, a cold provider), so
+ *  this only annotates the line; it never claims the run is dead. */
+const STALL_FIRST_TOKEN_MS = 60_000;
 /** Repaint cadence while a call is running, so its elapsed time keeps counting
  *  even when the command emits no output (the hung case). */
 const STALL_REPAINT_MS = 5_000;
@@ -2749,11 +2763,18 @@ function scheduleRender() {
  *  it: it would look like a timer that had stopped rather than a command that
  *  had. A no-op whenever nothing is running, so the interval costs a Map scan.
  *  renderStatus is called directly because the deadline lives in the status bar
- *  too, and it is a text assignment when nothing changed. */
+ *  too, and it is a text assignment when nothing changed.
+ *
+ *  The transcript is only re-rendered when a tool call is what is running: that
+ *  elapsed time is drawn on the call's own row. A run waiting on the provider
+ *  with no tool in flight has nothing aging in the transcript, so the status bar
+ *  alone is repainted — otherwise a silent provider would cost a full transcript
+ *  render every STALL_REPAINT_MS for no visible change. */
 elapsedTimer = setInterval(() => {
-  if (!state.isStreaming && !slowestRunningCall()) return;
+  const running = slowestRunningCall();
+  if (!state.isStreaming && !running) return;
   renderStatus();
-  scheduleRender();
+  if (running) scheduleRender();
 }, STALL_REPAINT_MS);
 
 function scrollBottom() {
@@ -3698,6 +3719,16 @@ function renderStatus() {
     if (slow) {
       text += ` · ${slow.toolName || "tool"} running ${fmtElapsed(slow.elapsed)}`;
       if (slow.elapsed >= STALL_AFTER_MS) text += " — possibly stuck; Stop aborts it";
+    } else if (state.lastActivityAt != null) {
+      // Nothing is running, so the run is between tool calls: waiting on the
+      // provider. Name how long that has been silent once it crosses the
+      // threshold. This is the only signal for a provider that accepted the
+      // request and then returned nothing — the tool deadline above cannot fire
+      // because no tool is in flight.
+      const silent = Date.now() - state.lastActivityAt;
+      if (silent >= STALL_FIRST_TOKEN_MS) {
+        text += ` · no response for ${fmtElapsed(silent)} — the provider may have dropped the connection; Stop aborts it`;
+      }
     }
     $("#status-text").textContent = text;
     bar.classList.remove("hidden");
@@ -5201,6 +5232,7 @@ async function switchSession(file, cwd) {
   state.queued = { steering: [], followUp: [] };
   state.isStreaming = false;
   state.isCompacting = false;
+  state.lastActivityAt = null;
   currentAssistant = null;
   $("#composer-hint").textContent = "";
   renderStatus(); // drop the previous session's queue chips now, not after the spawn
@@ -5280,6 +5312,7 @@ async function newSession() {
     state.queued = { steering: [], followUp: [] };
     state.isStreaming = false;
     state.isCompacting = false;
+    state.lastActivityAt = null;
     currentAssistant = null;
     // clear the transcript immediately — refresh() below rebuilds from the
     // fresh (empty) session, but this makes the reset visible without delay
@@ -5390,6 +5423,10 @@ function ensureBlock(item, idx, type) {
 }
 
 function handleEvent(record) {
+  // Every event for a live run is a sign of life, whichever one it is. Stamping
+  // it here rather than in each case means a new event type cannot silently stop
+  // the "waiting for a reply" clock without someone noticing.
+  if (state.isStreaming) state.lastActivityAt = Date.now();
   switch (record.type) {
     case "server": {
       if (record.event === "pi_exit") {
@@ -5397,6 +5434,7 @@ function handleEvent(record) {
         $("#pi-status").className = "pi-status bad";
         $("#pi-status").onclick = restartPi;
         state.isStreaming = false;
+        state.lastActivityAt = null;
         // the queue died with the process; leaving the chips up would offer a
         // per-item undo that cannot work
         state.queued = { steering: [], followUp: [] };
@@ -5422,6 +5460,10 @@ function handleEvent(record) {
     }
     case "agent_start":
       state.isStreaming = true;
+      // The clock for "the provider accepted this and has sent nothing back"
+      // starts here, not at the HTTP call: agent_start is the earliest point the
+      // browser knows a run exists.
+      state.lastActivityAt = Date.now();
       renderStatus();
       // a late extension registration can add models after boot's retry loop
       // gave up; top up the picker before the run picks its model
@@ -5632,6 +5674,7 @@ function handleEvent(record) {
       break;
     case "agent_settled": {
       state.isStreaming = false;
+      state.lastActivityAt = null;
       renderStatus();
       scheduleSettledRefresh();
       break;
