@@ -259,9 +259,26 @@ export class SessionHost {
    *  leaves every other session in the workspace with extension handlers that
    *  throw "This extension ctx is stale", and every session opened afterwards
    *  reports the same error on its own `session_start`. Rebuilding the loader
-   *  per session is what keeps the runtimes separate; the model runtime (network
-   *  catalog, provider registrations) and the settings manager are the parts
-   *  that are safe, and expensive enough, to share. */
+   *  per session is what keeps the runtimes separate.
+   *
+   *  The `ModelRuntime` is NOT shared either, for a second and unrelated reason.
+   *  A `ModelRuntime` holds ONE registration per provider, and extensions
+   *  re-register on every `session_start` (`pi-cursor-sdk` calls
+   *  `registerProvider` there). Because `registerProvider` replaces the previous
+   *  registration, opening a sibling session in the same workspace silently
+   *  takes the provider over from the session that already owned it. Cursor
+   *  stamps each request with a receipt naming the owning registration and
+   *  fails closed when the receipt and the current registration disagree:
+   *
+   *    "Cursor provider ownership is unavailable: this request does not belong
+   *     to the active Cursor registration."
+   *
+   *  That error is sticky (the displaced session never gets its registration
+   *  back, so `continue` fails forever, whatever the model), and it does not
+   *  heal on reload because the reloading session takes the provider over in
+   *  turn. Each session therefore gets its own `ModelRuntime`; it costs ~6-10 ms
+   *  to build, and its model catalog converges to the same list. Only the
+   *  settings manager is genuinely shareable. */
   async workspaceFor(cwd) {
     const resolved = path.resolve(cwd);
     const cached = this.workspaces.get(resolved);
@@ -271,7 +288,9 @@ export class SessionHost {
     const build = (async () => {
       try {
         const services = await this.sdk.createAgentSessionServices({ cwd: resolved });
-        const shared = { modelRuntime: services.modelRuntime, settingsManager: services.settingsManager };
+        // Keep only the settings manager. Dropping the services object here is
+        // what drops the model runtime and the loader with it.
+        const shared = { settingsManager: services.settingsManager };
         this.workspaces.set(resolved, shared);
         return shared;
       } finally {
@@ -282,14 +301,14 @@ export class SessionHost {
     return build;
   }
 
-  /** One session's own services: the workspace's shared parts plus a fresh
-   *  resource loader, hence a fresh extension runtime. */
+  /** One session's own services: the workspace's shared settings plus a fresh
+   *  model runtime and a fresh resource loader, hence a fresh extension runtime
+   *  and its own provider registrations. */
   async servicesFor(cwd) {
     const resolved = path.resolve(cwd);
     const shared = await this.workspaceFor(resolved);
     return this.sdk.createAgentSessionServices({
       cwd: resolved,
-      modelRuntime: shared.modelRuntime,
       settingsManager: shared.settingsManager,
     });
   }
