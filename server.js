@@ -29,6 +29,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { loadSdk } from "./sdk/load.js";
 import { SessionHost } from "./sdk/host.js";
+import { watchWire } from "./sdk/wire.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -2410,6 +2411,11 @@ server.on("error", (/** @type {NodeJS.ErrnoException} */ err) => {
 async function boot() {
   const { mod, root, version } = await loadSdk(SDK_PATH);
   sessionHost = new SessionHost({ sdk: mod, cwd: CWD, sessionDir: SESSION_DIR, clients });
+  // Start watching the provider sockets before the first run can go quiet.
+  // Subscription is unconditional and side-effect free: `net.client.socket` is
+  // a Node channel that only fires for client TLS sockets, and a Node without
+  // it simply never fires, which leaves the stall watchdog on its fallback.
+  watchWire();
   wireProcessTracking();
   console.log(`[pi-ui] pi SDK ${version} loaded from ${root}`);
 

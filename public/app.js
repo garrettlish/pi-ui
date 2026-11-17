@@ -106,6 +106,10 @@ const state = {
    *  accepts the request and then sends nothing becomes visible instead of
    *  looking like a slow model. */
   lastActivityAt: null,
+  /** Set while the server has looked at the connection and found it healthy, so
+   *  the status line can say "the model is thinking" instead of implying a
+   *  fault. Cleared by the next real event. */
+  waitingNote: "",
   sessionFile: null,
   sessionId: null,
   sessionName: null,
@@ -1139,6 +1143,10 @@ const STALL_AFTER_MS = 120_000;
  *  A reply can legitimately take a while (long reasoning, a cold provider), so
  *  this only annotates the line; it never claims the run is dead. */
 const STALL_FIRST_TOKEN_MS = 60_000;
+/** Server events that are *about* a silence rather than a sign of life. They
+ *  must not advance `lastActivityAt`, or the clock they describe would keep
+ *  being reset by its own report. */
+const STALL_NOTICE_EVENTS = new Set(["run_waiting", "run_stalled", "run_retrying", "run_retry_failed"]);
 /** Repaint cadence while a call is running, so its elapsed time keeps counting
  *  even when the command emits no output (the hung case). */
 const STALL_REPAINT_MS = 5_000;
@@ -1152,6 +1160,63 @@ function capText(t) {
   return s.length > MAX_TOOL_TEXT ? `${s.slice(0, MAX_TOOL_TEXT)}\n… truncated (${s.length} chars total)` : s;
 }
 
+/** Absolute path for an image a tool named, or null when it cannot be made one.
+ *
+ *  A Cursor session's `read` args are display paths — pi-cursor-sdk rewrites
+ *  them relative to the workspace (`docs/architecture/system-overview.jpg`),
+ *  even when the tool read the absolute path. `/api/image` takes absolute paths
+ *  only, deliberately (a relative one must not be resolved against whatever cwd
+ *  the server happens to have), so a relative target is joined onto the
+ *  session's own cwd — the directory that relative path is relative to. */
+function absoluteImagePath(target) {
+  if (target.startsWith("/")) return target;
+  if (!state.cwd) return null;
+  const base = state.cwd.replace(/\/+$/, "");
+  // A display path is `relative(cwd, abs)`, so it never climbs out; a target
+  // that does is not a path this popup was handed, and is not resolved.
+  const parts = [];
+  for (const seg of target.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") return null;
+    parts.push(seg);
+  }
+  return parts.length ? `${base}/${parts.join("/")}` : null;
+}
+
+/** The JSON object a text starts with, or null.
+ *
+ *  `pi-cursor-sdk` renders a read's metadata stub and then, when `totalLines`
+ *  exceeds its display limit, appends "[N more lines in file. Use offset=…]".
+ *  The appended notice is not JSON, so a plain `JSON.parse` of the whole text
+ *  throws and the picture is missed — which is the shape seen in real Cursor
+ *  sessions (`{content:"", totalLines:302, fileSize:16387}` plus the notice). */
+function leadingJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) {
+      try {
+        return JSON.parse(text.slice(start, i + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
 /** Why a `read` of a picture produced no image block, if it did not.
  *
  *  A picture normally comes back as an image block and renders from its bytes.
@@ -1159,7 +1224,8 @@ function capText(t) {
  *  server can serve those bytes — but only for a result that genuinely read a
  *  picture. Three text-only shapes qualify, and each says why there is no block:
  *
- *  - `metadata`  the tool reported only `{content: "", fileSize: N}`
+ *  - `metadata`  the tool reported only `{content: "", fileSize: N}` (a Cursor
+ *                read of a binary file reports `{content:"", totalLines, fileSize}`)
  *  - `truncated` the file was treated as text and its first line blew the byte
  *                limit, so the tool refused to read it at all
  *  - `omitted`   the tool saw the picture but could not inline it (too large to
@@ -1171,29 +1237,30 @@ function capText(t) {
  *
  *  Observed 2026-11-15: a `.jpg` whose bytes were base64 text hit `truncated`
  *  and showed no image at all, which read as "JPEGs do not display" — the
- *  format was never the variable, the *shape* of the result was. */
+ *  format was never the variable, the *shape* of the result was.
+ *
+ *  Observed 2026-11-17: every Cursor `read` fell through here, because the args
+ *  are relative and this demanded a leading "/". A `.jpg` therefore opened as a
+ *  bare `{content:"", totalLines:0, fileSize:396061}` with no picture. */
 function imageBlockAbsence(call, result) {
   if (!result || result.isError) return null;
   const content = result.content || [];
   if (content.some((b) => b && b.type === "image")) return null;
   const target = call.arguments?.path ?? call.arguments?.file_path ?? call.arguments?.file;
-  if (typeof target !== "string" || !target.startsWith("/")) return null;
+  if (typeof target !== "string" || !target) return null;
   // the extension is the only hint here: nothing was sniffed, or it would have
   // come back as a block
   if (!/\.(png|jpe?g|gif|webp)$/i.test(target)) return null;
+  const imagePath = absoluteImagePath(target);
+  if (!imagePath) return null;
   const text = content.map((b) => (b && b.type === "text" ? b.text : "")).join("\n").trim();
   if (!text) return null;
-  let meta;
-  try {
-    meta = JSON.parse(text);
-  } catch {
-    meta = null;
-  }
+  const meta = leadingJsonObject(text);
   if (meta && typeof meta === "object" && typeof meta.fileSize === "number" && meta.content === "") {
-    return { path: target, reason: "metadata" };
+    return { path: imagePath, reason: "metadata" };
   }
-  if (result.details?.truncation && /^\[Line \d+ is /.test(text)) return { path: target, reason: "truncated" };
-  if (/^(Read image file \[|\[Image omitted:)/.test(text)) return { path: target, reason: "omitted" };
+  if (result.details?.truncation && /^\[Line \d+ is /.test(text)) return { path: imagePath, reason: "truncated" };
+  if (/^(Read image file \[|\[Image omitted:)/.test(text)) return { path: imagePath, reason: "omitted" };
   return null;
 }
 
@@ -3898,11 +3965,18 @@ function renderStatus() {
       // request and then returned nothing — the tool deadline above cannot fire
       // because no tool is in flight.
       const silent = Date.now() - state.lastActivityAt;
-      if (silent >= STALL_FIRST_TOKEN_MS) {
-        // Say what will actually happen, not just that it is slow: the server
-        // aborts a silent run on its own (STALL_ABORT_AFTER_MS in sdk/host.js),
-        // so the user can also just wait instead of guessing.
-        warning = `No response for ${fmtElapsed(silent)} — the provider may have dropped the connection. It is aborted automatically if it stays silent; Stop aborts now.`;
+      if (state.waitingNote) {
+        // The server checked the connection and it is up, so this is the model
+        // taking its time. Said once, as information rather than a warning.
+        text += ` · ${state.waitingNote}`;
+      } else if (silent >= STALL_FIRST_TOKEN_MS) {
+        // Say what will actually happen, not just that it is slow: after
+        // WIRE_CHECK_AFTER_MS the server looks at the socket itself and ends the
+        // run at once if it is gone, so "keep waiting" is a real option here
+        // rather than a guess about a five-minute deadline. The wording stays
+        // in the subjunctive on purpose — nothing has been proven yet at this
+        // point, which is exactly what the check is for.
+        warning = `No response for ${fmtElapsed(silent)} — the provider may have dropped the connection (a dead connection is detected rather than waited out). Stop aborts now.`;
       }
     }
     $("#status-text").textContent = text;
@@ -5625,7 +5699,16 @@ function handleEvent(record) {
   // Every event for a live run is a sign of life, whichever one it is. Stamping
   // it here rather than in each case means a new event type cannot silently stop
   // the "waiting for a reply" clock without someone noticing.
-  if (state.isStreaming) state.lastActivityAt = Date.now();
+  //
+  // Except pi-ui's own notices about a silence, which are not signs of life:
+  // stamping "the wire is up, keep waiting" as activity would reset the very
+  // clock it is describing, and the wait would never be named again.
+  if (state.isStreaming && !STALL_NOTICE_EVENTS.has(record.event)) {
+    state.lastActivityAt = Date.now();
+    // Anything the provider sends ends the "checked and up" note; it describes
+    // one silence, not the run.
+    state.waitingNote = "";
+  }
   switch (record.type) {
     case "server": {
       if (record.event === "pi_exit") {
@@ -5647,11 +5730,38 @@ function handleEvent(record) {
       } else if (record.event === "run_stalled") {
         // The server gave up on a run whose provider went silent. Without this
         // the turn simply stopped and the reason lived only in the server log.
-        // A toast names it and offers the retry, and the status line stops
-        // claiming work is happening — the abort event may arrive separately.
-        toast(record.message || "the run stalled and was aborted", "error", 8000);
+        // `proven` distinguishes "the wire was checked and it is gone" from
+        // "nothing has arrived for long enough", and `willRetry` means the
+        // server is already re-sending — so the toast says which one happened
+        // rather than offering a retry that is already underway.
+        if (record.willRetry) toast(record.message || "connection lost — re-sending", "warning", 9000);
+        else toast(record.message || "the run stalled and was aborted", "error", 9000);
         state.isStreaming = false;
         state.lastActivityAt = null;
+        state.waitingNote = "";
+        renderStatus();
+      } else if (record.event === "run_retrying") {
+        // The server re-sent the prompt it had already recorded, and first took
+        // the dead attempt back off the session branch. The page has to follow:
+        // without this refresh the failed turn stays painted and the re-send
+        // appears to duplicate it. `refresh()` rebuilds from the branch, and its
+        // live-carry-over only keeps items appended *after* the snapshot was
+        // requested — so the abandoned turn is dropped, not duplicated.
+        state.isStreaming = true;
+        state.lastActivityAt = Date.now();
+        state.waitingNote = "";
+        renderStatus();
+        refresh().catch(() => {});
+      } else if (record.event === "run_retry_failed") {
+        toast(`re-send failed: ${record.error || "unknown error"} — send the message again to retry`, "error", 12000);
+        state.isStreaming = false;
+        state.lastActivityAt = null;
+        renderStatus();
+      } else if (record.event === "run_waiting") {
+        // The server looked at the connection and found it healthy: the wait is
+        // the model's, not the network's. Shown as its own line so "slow" never
+        // reads as "broken".
+        state.waitingNote = record.detail || "";
         renderStatus();
       } else if (record.event === "background_processes") {
         // the server watched these appear during a bash call and now reports
@@ -5670,8 +5780,10 @@ function handleEvent(record) {
       state.isStreaming = true;
       // The clock for "the provider accepted this and has sent nothing back"
       // starts here, not at the HTTP call: agent_start is the earliest point the
-      // browser knows a run exists.
+      // browser knows a run exists. A previous run's "connection is up" note
+      // describes that run, not this one.
       state.lastActivityAt = Date.now();
+      state.waitingNote = "";
       renderStatus();
       // a late extension registration can add models after boot's retry loop
       // gave up; top up the picker before the run picks its model
@@ -5883,6 +5995,7 @@ function handleEvent(record) {
     case "agent_settled": {
       state.isStreaming = false;
       state.lastActivityAt = null;
+      state.waitingNote = "";
       renderStatus();
       scheduleSettledRefresh();
       break;

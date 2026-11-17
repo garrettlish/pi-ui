@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "test": "node test/smoke.js",
-    "check": "node --check server.js && node --check public/app.js && node --check test/smoke.js && node --check sdk/load.js && node --check sdk/host.js && node --check sdk/events.js && node --check sdk/images.js && node --check sdk/ui-context.js",
+    "check": "node --check server.js && node --check public/app.js && node --check test/smoke.js && node --check sdk/load.js && node --check sdk/host.js && node --check sdk/events.js && node --check sdk/images.js && node --check sdk/ui-context.js && node --check sdk/wire.js",
     "typecheck": "tsc -p jsconfig.json && tsc -p jsconfig.web.json"
   },
   "engines": {

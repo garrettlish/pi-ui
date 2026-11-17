@@ -40,6 +40,7 @@ import { randomUUID } from "node:crypto";
 import { toJsonEvent } from "./events.js";
 import { ImageStash, offloadEntries } from "./images.js";
 import { ExtensionUi } from "./ui-context.js";
+import { watchWire, wireVerdict, wireHost, probeHost } from "./wire.js";
 
 /** Idle sessions with no attached browser are disposed after this long. */
 const IDLE_REAP_MS = 30 * 60 * 1000;
@@ -61,6 +62,68 @@ const IDLE_REAP_MS = 30 * 60 * 1000;
  *  on purpose — a tab that is closed can still be aborted, while only an open
  *  tab can draw the line — and the smoke test asserts this one is the larger. */
 const STALL_ABORT_AFTER_MS = 5 * 60 * 1000;
+
+/** How long a silence is given before the wire is asked what it thinks.
+ *
+ *  Below this, a run is simply working: measured over this machine's 791 Cursor
+ *  turns, a first token arrives in 26 s at the median and 91 s at p90, so
+ *  probing earlier would spend requests on runs that are about to answer.
+ */
+const WIRE_CHECK_AFTER_MS = 90 * 1000;
+
+/** Automatic re-sends allowed per prompt when a *proven* dead connection is
+ *  what killed the run. One: a second failure means the endpoint is the
+ *  problem, and retrying into that only delays the message the user needs. */
+const AUTO_RETRY_MAX = 1;
+
+/** How often the wire is re-asked about one unbroken silence.
+ *
+ *  The first answer is not the last word: a socket can be carrying bytes at 90 s
+ *  and die at 400 s, and a route can drop after a reachability probe succeeded.
+ *  Re-checking on this interval keeps a run that outlives its connection from
+ *  waiting out the full fallback, while staying far below the socket sampling
+ *  rate so a long silence costs a handful of verdicts, not a loop. */
+const WIRE_RECHECK_MS = 30 * 1000;
+
+/** How long an abort is given to settle before the re-send stops waiting on it.
+ *  `AgentSession.abort()` ends with `await waitForIdle()`, and a run whose
+ *  connection is gone is precisely what never becomes idle, so the wait has to
+ *  be bounded or the recovery it gates would never run. */
+const ABORT_SETTLE_MS = 10 * 1000;
+
+/** Whether a streamed assistant delta put something on screen.
+ *
+ *  `message_update` carries the in-flight `assistantMessageEvent`, whose type
+ *  says which kind of delta it is. Starting a tool call or a text block is
+ *  visible; a bare `start`/`finish` marker is not. Used only to decide whether a
+ *  later silence can be re-sent automatically, so an over-estimate is the safe
+ *  direction: it leaves the turn to the user. */
+function hasVisibleDelta(event) {
+  const inner = event.assistantMessageEvent;
+  if (!inner || typeof inner.type !== "string") return false;
+  if (inner.type === "toolcall_start") return true;
+  if (inner.type !== "text_delta" && inner.type !== "thinking_delta") return false;
+  return Boolean(String(inner.delta || "").length);
+}
+
+/** Whether an assistant message is only pi's marker for an aborted run.
+ *
+ *  `handleRunFailure` in `@earendil-works/pi-agent-core` emits one of these when
+ *  a run is aborted: role "assistant", empty text, `stopReason: "aborted"`. It
+ *  exists so the transcript records *that* the turn ended, and it carries no
+ *  model output — which is what decides whether a rewind before a re-send would
+ *  throw away something the reader saw. */
+function isEmptyAbortMessage(message) {
+  if (message.stopReason !== "aborted") return false;
+  const blocks = Array.isArray(message.content) ? message.content : [];
+  return !blocks.some(
+    (b) =>
+      b &&
+      ((b.type === "text" && String(b.text || "").trim()) ||
+        (b.type === "thinking" && String(b.thinking || "").trim()) ||
+        b.type === "toolCall")
+  );
+}
 
 /** What `session.prompt()` reports for an accepted prompt, in the RPC shape. */
 const PROMPT_DISPOSITIONS = new Set(["started", "queued", "handled"]);
@@ -89,6 +152,36 @@ class Session {
      *  the sweeper reports it once rather than every pass. Cleared by the next
      *  `agent_start`, and by a stall abort that failed to land. */
     this.stallAborted = false;
+    /** When the wire was last consulted about a silence, and what it said.
+     *  Compared against `lastActivity`, so any new event re-arms the check.
+     *  `wireAliveNoticed` keeps a proof-of-life notice to one per silence. */
+    this.wireCheckedAt = 0;
+    this.wireAliveNoticed = false;
+    /** The prompt the browser last submitted, kept so a run that a *proven*
+     *  dead connection killed can be re-sent without the user retyping it.
+     *  Only a run that executed no tool is ever re-sent automatically: a tool
+     *  call is a side effect, and repeating one is worse than a lost turn.
+     *  A steer is excluded too — it is mid-run text, not a turn's opening
+     *  message, so re-sending it would replay the wrong thing. */
+    this.lastPrompt = null;
+    /** The leaf that was active before that prompt was recorded. A re-send
+     *  needs it to take the lost turn back off the branch: re-sending on top of
+     *  the dead turn would hand the model the same message twice. */
+    this.lastPromptParentId = null;
+    /** How many tool calls the current run has started. */
+    this.toolCallsThisRun = 0;
+    /** Tool calls currently in flight. A running tool explains a silence on its
+     *  own, so the wire is not consulted while one is open (see
+     *  `#checkWireForStall`). */
+    this.runningTools = 0;
+    /** Whether this run put anything on screen: streamed text, thinking, a tool
+     *  call, or partial tool output. A silence that happened *after* visible
+     *  output is not a message that never arrived, so it is never re-sent
+     *  automatically — the reader would watch the same lines appear twice. */
+    this.runProducedOutput = false;
+    /** Automatic re-sends spent on `lastPrompt`, capped so a genuinely broken
+     *  endpoint cannot become a loop. */
+    this.autoRetries = 0;
     this.queued = { steering: [], followUp: [] };
     this.unsubscribe = null;
     this.ui = new ExtensionUi((record) => this.broadcast(record));
@@ -196,12 +289,42 @@ class Session {
 
   #onEvent(event) {
     this.lastActivity = Date.now();
+    // Any event is new evidence about this run, so the wire check is re-armed
+    // and a previous proof-of-life no longer describes the current silence.
+    this.wireAliveNoticed = false;
     if (event.type === "agent_start") {
       this.isStreaming = true;
       // A new run starts clean: the previous run's stall verdict must not carry
       // over and make the sweeper skip this one.
       this.stallAborted = false;
-    } else if (event.type === "agent_settled" || event.type === "agent_end") this.isStreaming = false;
+      this.wireCheckedAt = 0;
+      this.toolCallsThisRun = 0;
+      this.runningTools = 0;
+      this.runProducedOutput = false;
+    } else if (event.type === "agent_settled" || event.type === "agent_end") {
+      this.isStreaming = false;
+      // A run that ended on its own closes the exchange, so the next prompt
+      // starts with a full retry budget even if it repeats the same text.
+      // A stall-aborted run deliberately keeps its budget: re-sending is what
+      // the budget caps, and clearing it here would let a broken endpoint loop.
+      if (!this.stallAborted) this.autoRetries = 0;
+    }
+    if (event.type === "tool_execution_start") {
+      this.toolCallsThisRun += 1;
+      this.runningTools += 1;
+      this.runProducedOutput = true;
+    } else if (event.type === "tool_execution_end") {
+      // Clamped: a result arriving for a call this listener never saw start
+      // (a session adopted mid-run) must not drive the count negative, or the
+      // guard would then need to be `!== 0` and would stop explaining anything.
+      this.runningTools = Math.max(0, this.runningTools - 1);
+    } else if (event.type === "message_update") {
+      // Streamed text or thinking means the reader has already seen the turn
+      // start. Recorded from the event, not from the branch afterwards: a
+      // dropped connection can lose the persisted copy of text that was
+      // rendered, and the *rendered* copy is what a re-send would duplicate.
+      if (hasVisibleDelta(event)) this.runProducedOutput = true;
+    }
     // Queue state is only emitted on change, and `get_state` may not carry the
     // text, so keep the last snapshot for a tab that re-attaches mid-run.
     if (event.type === "queue_update") {
@@ -830,6 +953,32 @@ export class SessionHost {
    */
   prompt(sessionHost, command) {
     const session = sessionHost.session;
+    // Remembered before the send: a run killed by a dead connection must be
+    // re-sendable, and by then the text only exists in the browser's composer
+    // history. A prompt that differs from the last one is a new message, so its
+    // retry budget starts over.
+    //
+    // A steer is skipped: it is text injected into a run already underway, so
+    // re-sending it would replay a mid-turn instruction as if it opened the
+    // turn. `streamingBehavior` says which shape this is — a fresh send carries
+    // nothing there.
+    const message = command.message;
+    const startsTurn = typeof message === "string" && command.streamingBehavior !== "steer";
+    if (startsTurn) {
+      // The leaf *before* this send: the entry the message is about to be
+      // appended under. A re-send returns here first, so the failed attempt's
+      // user message is not still on the branch when the new one is appended.
+      //
+      // Recorded on every turn, not only when the text changes: typing the same
+      // prompt twice is two turns, and keeping the older leaf would make a
+      // re-send of the second one rewind past the first.
+      sessionHost.lastPromptParentId = session.sessionManager.getLeafId() || null;
+      if (message !== sessionHost.lastPrompt?.message || command.images?.length) {
+        // A different message is a new intent, so its retry budget starts over.
+        if (message !== sessionHost.lastPrompt?.message) sessionHost.autoRetries = 0;
+        sessionHost.lastPrompt = { message, images: command.images };
+      }
+    }
     return new Promise((resolve) => {
       let answered = false;
       const answer = (result) => {
@@ -954,19 +1103,37 @@ export class SessionHost {
    * across the session files on this machine eleven turns were still hanging
    * with the oldest weeks old — the state never self-heals.
    *
-   * ## Why it is not a plain deadline
+   * ## Why silence alone is not enough — and what replaces it
    *
-   * Silence alone does not distinguish a dead connection from a slow one, and a
-   * slow one is common here: 2.19% of 37,872 measured healthy gaps exceed 60 s,
-   * with p99 at 154 s. So the two jobs are split. The tab names the silence
-   * after a minute (`STALL_FIRST_TOKEN_MS` in public/app.js) and aborts nothing;
-   * this host aborts at STALL_ABORT_AFTER_MS, past 99.5% of every gap a working
-   * run has produced. A false positive costs one re-sent message, and only for a
-   * run that had already been silent for five minutes.
+   * The event stream cannot tell a dead connection from a slow one. Measured
+   * over this machine's 791 Cursor turns: a first token takes 26 s at the
+   * median, 91 s at p90 and 320 s at p99, and nine turns waited past 300 s and
+   * then answered. Any single wall-clock number is therefore wrong in one
+   * direction — too low aborts work that was about to land, too high burns
+   * minutes on a connection that is provably gone.
    *
-   * Reporting goes through the ordinary event stream (`server` / `run_stalled`)
-   * so the tab shows why the turn stopped instead of freezing. The sweep only
-   * runs while a session is streaming, so the numbers above are the whole cost.
+   * So the deadline became the *fallback*, and two checks refine it — see
+   * `sdk/wire.js` for the measurements behind both. Only one of them can end a
+   * run early:
+   *
+   *  - a live socket (`bytesRead` advancing). This never aborts: it only says
+   *    the wait belongs to the provider, so the tab stops implying a fault.
+   *    A *closed* socket is deliberately not used — measured, undici reports an
+   *    error when it recycles a healthy idle connection, and a real HTTP/2 drop
+   *    reports none, so a close proves nothing either way.
+   *  - reachability. A dead route (network off, VPN down) sends no FIN at all,
+   *    so no socket event ever fires — and this machine's TCP keepalive is two
+   *    hours, far longer than any run. One probe to the host the run talks to
+   *    answers it, and it is only sent once a run has been quiet that long.
+   *
+   * Everything here degrades to the old behaviour: no socket records, no
+   * channel, another provider, a probe that comes back fine — all leave the
+   * fallback in charge.
+   *
+   * Reporting stays on the ordinary event stream (`server` / `run_stalled`) so
+   * the tab shows why the turn stopped instead of freezing, and the message
+   * carries what was actually observed so "may have dropped" is never asserted
+   * over a connection that was checked.
    */
   reapStalled(now = Date.now()) {
     for (const [key, session] of this.sessions) {
@@ -974,24 +1141,286 @@ export class SessionHost {
       // Already aborted this run: one notice per dead run, not one per sweep.
       if (session.stallAborted) continue;
       const silentFor = now - session.lastActivity;
-      if (silentFor < STALL_ABORT_AFTER_MS) continue;
-      session.stallAborted = true;
-      const seconds = Math.round(silentFor / 1000);
-      console.error(`[pi-ui] run silent for ${seconds}s (key=${key}) — aborting`);
-      // Broadcast before the abort: once it lands the transcript shows an
-      // aborted turn with no reason, and the reason is the whole point.
-      session.broadcast({
-        type: "server",
-        event: "run_stalled",
-        silentForMs: silentFor,
-        message: `no response from the provider for ${seconds}s — the run was aborted. The connection may have dropped; send the message again to retry.`,
+      if (silentFor < STALL_ABORT_AFTER_MS) {
+        // Below the fallback: only a *positive* "the connection is gone" can
+        // end this run early. A probe in flight or a clean verdict changes
+        // nothing, so a slow provider is never cut short by this branch.
+        // Errors are contained here: this runs from a interval, so a rejected
+        // promise would otherwise surface as an unhandled rejection.
+        void this.#checkWireForStall(session, silentFor, now).catch((err) => {
+          console.error("[pi-ui] wire check failed:", err?.message || err);
+        });
+        continue;
+      }
+      this.#abortStalled(session, silentFor, { reason: "fallback" });
+    }
+  }
+
+  /**
+   * Ask the network whether a short silence is a dead connection.
+   *
+   * Two steps, in increasing cost: read the sockets the SDK already owns, then
+   * — only if those say nothing — send one reachability probe.
+   *
+   * Fire-and-forget, and re-asked on `WIRE_RECHECK_MS`: the first probe can
+   * succeed while the route drops later, so a run that outlives its connection
+   * should not have to sit out the five-minute fallback because the check ran
+   * too early.
+   */
+  async #checkWireForStall(session, silentFor, now) {
+    if (silentFor < WIRE_CHECK_AFTER_MS) return;
+    // One check per interval, not per sweep (the sweep runs every 15 s).
+    if (session.wireCheckedAt && now - session.wireCheckedAt < WIRE_RECHECK_MS) return;
+    // Only the Cursor transport is observable here. The socket records are
+    // process-wide, so a Cursor connection another session opened must never
+    // become evidence about an Anthropic or OpenAI run. Their transports are
+    // not observable and keep the old fallback untouched.
+    if (session.session?.model?.provider !== "cursor") return;
+    // A tool that is running is the reason there are no events: a build, a test
+    // suite or a long `grep` emits nothing for its whole duration. Neither check
+    // knows anything about a local command, and this branch runs at 90 s where
+    // that is the common case. The fallback keeps its old behaviour for a tool
+    // that really has hung, and the UI names the call either way.
+    if (session.runningTools > 0) return;
+    session.wireCheckedAt = now;
+    const since = session.lastActivity;
+    // A socket carrying bytes proves the transport is up: say so once, and let
+    // the fallback own the decision. This is the only use of the socket layer —
+    // a *closed* socket is not evidence of anything (see `sdk/wire.js`).
+    if (wireVerdict().state === "alive") {
+      if (!session.wireAliveNoticed) {
+        session.wireAliveNoticed = true;
+        session.broadcast({
+          type: "server",
+          event: "run_waiting",
+          silentForMs: silentFor,
+          detail: "the connection to the provider is up; the model has not answered yet",
+        });
+      }
+      return;
+    }
+    // Nothing observed. Ask the network directly — this is the case no socket
+    // event can report, and the only one that may end the run early.
+    //
+    // The host is the one observed on a real Cursor socket, never
+    // `model.baseUrl`: pi-cursor-sdk registers that as `https://cursor.com`
+    // while the run transport is `api2.cursor.sh`, so probing the model's URL
+    // would test the web host and prove nothing about the run.
+    const host = wireHost();
+    if (!host) return;
+    const probe = await probeHost(`https://${host}/`);
+    // The run may have resumed while the probe was in flight; aborting now
+    // would kill a turn that is streaming.
+    if (!session.isStreaming || session.lastActivity !== since) return;
+    if (!probe.reachable) {
+      this.#abortStalled(session, silentFor, {
+        reason: "network unreachable",
+        detail: probe.error || "no answer from the provider's host",
       });
-      void session.session.abort().catch((err) => {
-        console.error("[pi-ui] stall abort failed:", err?.message || err);
+    }
+  }
+
+  /**
+   * End one silent run and say why.
+   *
+   * `reason` decides two things: the sentence, and whether the turn can be
+   * re-sent on its own. Only `network unreachable` qualifies — the probe got no
+   * answer, so nothing can have been streaming, and the prompt provably never
+   * reached the provider. Re-sending it finishes a message that never arrived
+   * rather than repeating work. That is still only true if the run put nothing
+   * on screen and executed no tool: a tool call is a side effect, and running
+   * one twice is worse than losing the turn.
+   *
+   * The 5-minute fallback keeps the old behaviour entirely: it fires on silence
+   * alone, which is not evidence the provider never saw the request.
+   */
+  #abortStalled(session, silentFor, { reason, detail } = {}) {
+    const key = session.key;
+    session.stallAborted = true;
+    const seconds = Math.round(silentFor / 1000);
+    const why =
+      reason === "network unreachable"
+        ? `the provider could not be reached (${detail ?? "network error"})`
+        : "the connection may have dropped";
+    const proven = reason === "network unreachable";
+    const canResend = proven && this.#canAutoRetry(session);
+    console.error(
+      `[pi-ui] run silent for ${seconds}s (key=${key}) — ${why}${canResend ? "; re-sending" : "; aborting"}`
+    );
+    // Broadcast before the abort: once it lands the transcript shows an
+    // aborted turn with no reason, and the reason is the whole point.
+    session.broadcast({
+      type: "server",
+      event: "run_stalled",
+      silentForMs: silentFor,
+      reason: reason ?? "fallback",
+      proven,
+      willRetry: canResend,
+      message: canResend
+        ? `${why} after ${seconds}s of silence — re-sending the message on a new connection.`
+        : `no response from the provider for ${seconds}s — ${why}. The run was aborted; send the message again to retry.`,
+    });
+    void this.#abandonStalled(session).then(async ({ aborted }) => {
+      if (!aborted) {
         // The abort did not land, so the run is still live as far as the SDK is
         // concerned. Clear the verdict so the next sweep tries again instead of
-        // leaving the session streaming forever.
+        // leaving the session streaming forever — and do not re-send into a run
+        // that is still occupying the session.
         session.stallAborted = false;
+        // The tab was told this run would be re-sent. It will not be, so say so
+        // rather than leaving it waiting on a turn that never starts.
+        if (canResend) {
+          session.broadcast({
+            type: "server",
+            event: "run_retry_failed",
+            error: "the stalled run could not be stopped in time",
+          });
+        }
+        return;
+      }
+      if (canResend) await this.#resendAfterStall(session);
+    });
+  }
+
+  /**
+   * Abort a dead run without waiting on a promise that may never settle.
+   *
+   * `AgentSession.abort()` ends with `await waitForIdle()`, and on a connection
+   * that is provably gone the run is exactly the thing that never becomes idle.
+   * Waiting there would turn "the socket died" into "the abort hangs", so the
+   * re-send would never happen — trading a five-minute hang for an unbounded
+   * one. The abort is issued, and only the *wait* is bounded: the SDK still
+   * tears its own side down, while the re-send stops depending on it.
+   */
+  async #abandonStalled(session, ms = ABORT_SETTLE_MS) {
+    const aborting = session.session.abort();
+    let timer = null;
+    const bounded = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+      timer.unref?.();
+    });
+    try {
+      const settled = aborting.then(
+        () => true,
+        (err) => {
+          console.error("[pi-ui] stall abort failed:", err?.message || err);
+          return false;
+        }
+      );
+      return { aborted: await Promise.race([settled, bounded]) };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Move the branch back to where the lost prompt started.
+   *
+   * Returns false when the branch holds work that must not be discarded. The
+   * caller has already applied the authoritative check (`runProducedOutput`,
+   * which counts what was *rendered*), so this is the second line of defence:
+   * a branch that grew an assistant reply or a tool result for any reason — a
+   * late write, a message the event stream did not attribute to this run — is
+   * left alone rather than silently cut off.
+   *
+   * `navigateTree` refuses while the session is streaming, which is why this is
+   * called after the abort has settled or been given up on.
+   */
+  async #rewindToPromptStart(session) {
+    const target = session.lastPromptParentId;
+    if (!target) return false;
+    const manager = session.session.sessionManager;
+    if (manager.getLeafId() === target) return true; // nothing was appended
+    // Everything after the target is the dead attempt. A toolResult entry means
+    // a tool ran (excluded earlier, but the check belongs with the branch, not
+    // with a counter). An assistant entry is allowed to be there when it is the
+    // one pi appends for an abort: `handleRunFailure` writes an assistant
+    // message with empty text and `stopReason: "aborted"`, which is a marker,
+    // not output. Anything else the model actually produced blocks the rewind.
+    let cur = manager.getLeafEntry();
+    const guard = new Set();
+    while (cur && cur.id !== target && !guard.has(cur.id)) {
+      guard.add(cur.id);
+      const message = cur.type === "message" ? cur.message : null;
+      if (message && message.role === "toolResult") return false;
+      if (message && message.role === "assistant" && !isEmptyAbortMessage(message)) return false;
+      cur = cur.parentId ? manager.getEntry(cur.parentId) : null;
+    }
+    if (!cur) return false; // the target is not on this branch: do not guess
+    try {
+      const result = await session.session.navigateTree(target, { summarize: false });
+      return !result?.cancelled;
+    } catch (err) {
+      console.error("[pi-ui] rewind before re-send failed:", err?.message || err);
+      return false;
+    }
+  }
+
+  /** May this stalled run be re-sent without the user asking? */
+  #canAutoRetry(session) {
+    if (session.disposed) return false;
+    // Any output means the reader watched this turn begin; re-sending would
+    // paint the same lines twice, and the abandoned attempt's text is already
+    // in the transcript where they can read it.
+    if (session.runProducedOutput) return false;
+    if (session.toolCallsThisRun > 0) return false;
+    if (!session.lastPrompt?.message) return false;
+    // Without the pre-send leaf there is nothing to rewind to, so the re-send
+    // would stack a second copy of the prompt on the dead turn. Checked here
+    // rather than after the abort: this is what `willRetry` promised the tab.
+    if (!session.lastPromptParentId) return false;
+    return session.autoRetries < AUTO_RETRY_MAX;
+  }
+
+  /**
+   * Re-send the prompt the dead connection lost.
+   *
+   * A fresh `prompt()` starts a new request on a new connection, which is the
+   * whole recovery: the SDK builds its agent per turn, so nothing of the dead
+   * transport survives. The abort has been given `ABORT_SETTLE_MS` to land (see
+   * `#abandonStalled`) — bounded, because the run it is aborting is the one that
+   * never goes idle.
+   *
+   * Failure is reported, never retried: the budget is one attempt per prompt,
+   * because a second failure means the endpoint, not the connection, is the
+   * problem — and by then the user is watching.
+   */
+  async #resendAfterStall(session) {
+    const pending = session.lastPrompt;
+    if (!pending?.message) return;
+    session.autoRetries += 1;
+    // Take the dead attempt off the branch before appending the new one. The
+    // failed turn left its own user message behind, so sending on top of it
+    // would hand the model the same prompt twice — a different conversation
+    // from the one the user is looking at, and a duplicate the UI would have to
+    // paint. `navigateTree` moves the leaf without deleting anything, so the
+    // abandoned attempt stays readable in history.
+    //
+    // Announced *after* the rewind, not before: the tab answers `run_retrying`
+    // by re-reading the branch, and a refresh that raced the rewind would paint
+    // the turn this is about to remove.
+    const rewindable = await this.#rewindToPromptStart(session);
+    if (!rewindable) {
+      // A turn that produced visible output is not silently discarded: the tab
+      // keeps what the reader already saw and the user decides.
+      session.broadcast({
+        type: "server",
+        event: "run_retry_failed",
+        error: "the lost turn had already produced output, so it was left in place",
+      });
+      return;
+    }
+    session.broadcast({ type: "server", event: "run_retrying", attempt: session.autoRetries });
+    try {
+      await session.session.prompt(pending.message, {
+        images: pending.images,
+        source: "rpc",
+      });
+    } catch (err) {
+      session.broadcast({
+        type: "server",
+        event: "run_retry_failed",
+        error: err?.message || String(err),
       });
     }
   }

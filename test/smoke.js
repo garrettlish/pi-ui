@@ -974,8 +974,16 @@ try {
   // and the bar read a flat "pi is working…" for twelve minutes. The run's last
   // sign of life is stamped on every event and named once it goes quiet.
   check("app.js thresholds a run that sends nothing back", /STALL_FIRST_TOKEN_MS = \d[\d_]*/.test(appJs));
-  check("app.js stamps a run's last sign of life", /function handleEvent\(record\)[\s\S]{0,300}state\.lastActivityAt = Date\.now\(\)/.test(appJs));
-  check("app.js starts that clock when the run starts", /case "agent_start":[\s\S]{0,300}state\.lastActivityAt = Date\.now\(\)/.test(appJs));
+  // Walk the body of handleEvent instead of a character window: the stamp now
+  // sits behind a guard (pi-ui's own silence notices are not signs of life), so
+  // a fixed window measures how many comment lines were added above it, not
+  // whether the stamp survived.
+  const handleEventBody = (appJs.match(/function handleEvent\(record\) \{[\s\S]*?\n\}/) || [""])[0];
+  check("app.js stamps a run's last sign of life", handleEventBody.includes("state.lastActivityAt = Date.now()"), `${handleEventBody.length} chars`);
+  // Walk the case body for the same reason as above: a window measures how much
+  // commentary sits in front of the stamp, not whether the stamp is there.
+  const agentStartCase = /case "agent_start":([\s\S]*?)\n    case /.exec(appJs)?.[1] ?? "";
+  check("app.js starts that clock when the run starts", agentStartCase.includes("state.lastActivityAt = Date.now()"), `${agentStartCase.length} chars`);
   check("app.js clears it when the run settles", /case "agent_settled":[\s\S]{0,200}state\.lastActivityAt = null/.test(appJs));
   check(
     "the status line names a silent provider",
@@ -1025,10 +1033,92 @@ try {
   // One dead run must produce one notice, and a failed abort must not leave the
   // session permanently skipped by the sweeper.
   check("the sweeper reports a dead run once", /if \(session\.stallAborted\) continue;/.test(hostJs));
-  check("a failed stall abort retries on the next sweep", /stall abort failed[\s\S]{0,300}session\.stallAborted = false/.test(hostJs));
+  // The abort is now bounded (a dead run is the thing that never goes idle), so
+  // "did not settle" covers both a rejection and a timeout: either way the
+  // verdict must be cleared, or the sweeper skips this run forever.
+  check("a failed stall abort retries on the next sweep", /if \(!aborted\)[\s\S]{0,400}session\.stallAborted = false/.test(hostJs));
+  check("a stall abort that rejects is logged, not thrown", /stall abort failed[\s\S]{0,200}return false/.test(hostJs));
   check("a new run clears the previous stall verdict", /agent_start[\s\S]{0,300}this\.stallAborted = false/.test(hostJs));
   check("the server sweeps for stalled runs", /setInterval\(\(\) => sessionHost\?\.reapStalled\(\)/.test(fs.readFileSync(new URL("../server.js", import.meta.url), "utf8")));
   check("app.js surfaces a stalled run to the user", appJs.includes('record.event === "run_stalled"'));
+
+  // Silence alone cannot tell a dead connection from a slow model, so the host
+  // asks the wire. Both halves are asserted here: that the evidence is
+  // classified correctly (a pure function, driven with synthetic records rather
+  // than a real socket), and that only a *proven* death can end a run early.
+  // Silence alone cannot tell a dead connection from a slow model, so the host
+  // asks the network. What it may *not* ask is the socket layer's opinion on a
+  // closed socket: measured 2026-11-17, undici reports `error UND_ERR_INFO
+  // "reset"` when it recycles a healthy idle connection, a real h1 drop reports
+  // ECONNRESET, and a real h2 drop reports neither — so a close proves nothing
+  // in either direction, and using it aborted healthy runs. Only an advancing
+  // byte counter is evidence, and only of life.
+  {
+    const wire = await import(new URL("../sdk/wire.js", import.meta.url).href);
+    const now = 1_000_000;
+    const S = 1000;
+    const cursor = (extra) => ({ cursor: true, openedAt: now - 100 * S, ...extra });
+
+    const alive = wire.classifyWire([cursor({ lastBytesAt: now - 2 * S })], { now });
+    check("a socket that moved bytes recently reads as alive", alive.state === "alive", alive.state);
+    // The point of the distinction: an open socket with no recent bytes is not
+    // evidence of death, it is no evidence at all — a run may be thinking.
+    const quiet = wire.classifyWire([cursor({ lastBytesAt: now - 120 * S })], { now });
+    check("an open but quiet socket reads as unknown, not dead", quiet.state === "unknown", quiet.state);
+    // The regression this replaced: a socket that closed is not a verdict. The
+    // shape a real drop leaves behind is exactly the shape a pool recycle
+    // leaves, so `closedAt` must not reach the state at all.
+    check(
+      "a closed socket is not evidence of a dead connection",
+      wire.classifyWire([cursor({ closedAt: now - 3 * S, closeKind: "error:ECONNRESET" })], { now }).state === "unknown"
+    );
+    check("sockets for other hosts are ignored", wire.classifyWire([{ cursor: false, lastBytesAt: now }], { now }).state === "unknown");
+    // The probe's own connection must never count as the run's: it would make
+    // the check prove itself healthy.
+    const probe = wire.classifyWire([{ cursor: true, probe: true, lastBytesAt: now - S }], { now });
+    check("the reachability probe's own socket is not evidence", probe.state === "unknown", probe.state);
+    // With no records at all — a Node without the channel, or another provider —
+    // every caller must land on the old, conservative behaviour.
+    check("no socket records read as unknown", wire.classifyWire([], { now }).state === "unknown");
+    check("wire.js has only the two verdicts it can prove", !/state: "dead"/.test(fs.readFileSync(new URL("../sdk/wire.js", import.meta.url), "utf8")));
+  }
+  // Early abort is gated on the wire on purpose: the frontend's first warning
+  // is 60 s, so a check before that would spend a request on a run that is
+  // about to answer (first token: 26 s median, 91 s p90 on this machine).
+  {
+    const ms = (expr) => expr.split("*").reduce((acc, part) => acc * Number(part.trim().replace(/_/g, "")), 1);
+    const wireAfter = ms(/WIRE_CHECK_AFTER_MS = ([^;]+)/.exec(hostJs)?.[1] ?? "0");
+    check("the wire is consulted after, not before, the first warning", wireAfter >= 60_000, String(wireAfter));
+    check("no tool means no side effect, so a proven dead connection may re-send", /#canAutoRetry\(session\)[\s\S]{0,400}toolCallsThisRun > 0/.test(hostJs));
+    check("the automatic re-send is capped", /AUTO_RETRY_MAX = 1\b/.test(hostJs));
+    // Only an unreachable host is proof the prompt never arrived; silence plus a
+    // closed socket is not, so the fallback keeps its old manual-retry message.
+    check("only an unreachable host may re-send on its own", /const proven = reason === "network unreachable";/.test(hostJs));
+    check("the tab is told a re-send is underway", hostJs.includes('event: "run_retrying"') && appJs.includes('record.event === "run_retrying"'));
+    // A steer is mid-run text, not the turn's opening message: replaying it
+    // would present an instruction as a prompt the user never re-sent.
+    check("a steer is never recorded as the re-sendable prompt", /streamingBehavior !== "steer"/.test(hostJs));
+
+    // Re-sending on top of the dead turn would hand the model the same prompt
+    // twice, so the rewind has to happen before the tab is told to re-read the
+    // branch — an announcement that races the rewind paints the turn it removes.
+    const resendBody = /async #resendAfterStall\(session\) \{([\s\S]*?)\n  \}/.exec(hostJs)?.[1] ?? "";
+    const rewindAt = resendBody.indexOf("#rewindToPromptStart");
+    const announceAt = resendBody.indexOf('event: "run_retrying"');
+    check("the dead turn is rewound before the re-send is announced", rewindAt >= 0 && announceAt > rewindAt, `${rewindAt} vs ${announceAt}`);
+    // Anything the reader watched appear is not a message that never arrived.
+    check("a run that produced output is never re-sent automatically", /runProducedOutput\) return false/.test(hostJs));
+    check("streamed text counts as output", /hasVisibleDelta\(event\)\) this\.runProducedOutput = true/.test(hostJs));
+    // Without a pre-send leaf there is nothing to rewind to, so `willRetry` must
+    // not promise a re-send that would stack a second prompt on the dead turn.
+    check("no rewind point means no automatic re-send", /lastPromptParentId\) return false/.test(hostJs));
+    // The abort is bounded; when it does not settle the tab is told the re-send
+    // it was promised is not happening.
+    check(
+      "a re-send that cannot happen is reported",
+      /could not be stopped in time[\s\S]{0,400}/.test(hostJs) && /if \(!aborted\)[\s\S]{0,600}run_retry_failed/.test(hostJs)
+    );
+  }
 
   // Syntax highlighting: a fenced block with a known language is tokenized, an
   // unknown one stays plain rather than guessing, and an oversized block is
@@ -1058,11 +1148,31 @@ try {
   // "JPEGs do not display", when the format was never the variable.
   check(
     "app.js recognises every text-only image result shape",
-    /function imageBlockAbsence\(call, result\)[\s\S]{0,2000}reason: "metadata"[\s\S]{0,400}reason: "truncated"[\s\S]{0,300}reason: "omitted"/.test(appJs)
+    /function imageBlockAbsence\(call, result\)[\s\S]{0,2600}reason: "metadata"[\s\S]{0,400}reason: "truncated"[\s\S]{0,300}reason: "omitted"/.test(appJs)
   );
   check(
     "app.js leads a text-only image result with the picture",
     /const missing = imageBlockAbsence\(call, result\);[\s\S]{0,400}imageResultSection\(/.test(appJs)
+  );
+  // A Cursor `read` names its target relative to the workspace, so an absolute
+  // path requirement here meant no Cursor read of a picture ever produced the
+  // fallback — the popup showed only `{content:"", totalLines:0, fileSize:N}`.
+  // Relative targets are joined onto the session cwd; `..` is refused because
+  // /api/image must stay restricted to the path the call actually named.
+  check(
+    "app.js resolves a relative read target against the session cwd",
+    /function absoluteImagePath\(target\)[\s\S]{0,600}state\.cwd[\s\S]{0,400}seg === "\.\."\) return null/.test(appJs)
+  );
+  // A Cursor read's metadata stub is not always the whole text: when the file
+  // has more lines than the display limit, pi-cursor-sdk appends "[N more lines
+  // in file. Use offset=…]", so a plain JSON.parse of the text threw and the
+  // picture was missed even for an absolute path. Observed 2026-11-17 in a real
+  // session as `{content:"", totalLines:302, fileSize:16387}` + that notice.
+  check(
+    "app.js parses a metadata stub that carries a continuation notice",
+    appJs.includes("function leadingJsonObject(text)") &&
+      appJs.includes("const meta = leadingJsonObject(text)") &&
+      !/JSON\.parse\(text\)/.test(appJs)
   );
 
   // The first paint cannot wait for app.js, so index.html decides the palette
