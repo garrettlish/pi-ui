@@ -849,6 +849,10 @@ const FOLLOWUP_DIR = path.resolve(
 const FOLLOWUP_ID = /^[A-Za-z0-9_-]{1,80}$/;
 const FOLLOWUP_TEXT_MAX = 2 * 1024 * 1024;
 const FOLLOWUP_LIST_MAX = 500;
+/** tags are the sidebar's tree branches, so they are kept few, short and
+ *  de-duplicated: a tag list longer than this is a mis-paste, not a filing */
+const FOLLOWUP_TAGS_MAX = 16;
+const FOLLOWUP_TAG_LEN = 40;
 /** per-file metadata, keyed by path and validated by mtime+size: listing reads
  *  every follow-up once, then only the ones that changed */
 const followupCache = new Map();
@@ -866,8 +870,29 @@ function followupMeta(rec) {
     cwd: rec.cwd || null,
     sessionFile: rec.sessionFile || null,
     sessionTitle: rec.sessionTitle || null,
+    tags: followupTags(rec),
     chars: typeof rec.text === "string" ? rec.text.length : 0,
   };
+}
+
+/** A follow-up's tags, normalised for the sidebar tree: trimmed, de-duplicated
+ *  case-insensitively, and capped in both count and length. A record written
+ *  before tags existed simply has none, which the tree renders as "untagged". */
+function followupTags(rec) {
+  if (!Array.isArray(rec.tags)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of rec.tags) {
+    if (typeof raw !== "string") continue;
+    const tag = raw.replace(/\s+/g, " ").trim().slice(0, FOLLOWUP_TAG_LEN);
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue; // the same branch twice would render twice
+    seen.add(key);
+    out.push(tag);
+    if (out.length >= FOLLOWUP_TAGS_MAX) break;
+  }
+  return out;
 }
 
 function stringField(value, max) {
@@ -2015,6 +2040,7 @@ const server = http.createServer(async (req, res) => {
         cwd: stringField(body.cwd, 4096),
         sessionFile: stringField(body.sessionFile, 4096),
         sessionTitle: stringField(body.sessionTitle, 300),
+        tags: Array.isArray(body.tags) ? followupTags({ tags: body.tags }) : [],
       };
       await fsp.mkdir(FOLLOWUP_DIR, { recursive: true });
       // write-then-rename: a half-written file must never be listed as a
@@ -2039,7 +2065,7 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
-    // Editing a kept summary: title and body only. Everything that places the
+    // Editing a kept summary: title, body and tags. Everything that places the
     // follow-up (id, createdAt, cwd, session link) stays as saved, so an edit
     // never reorders the list or detaches it from its session.
     if (followupMatch && req.method === "PATCH") {
@@ -2066,6 +2092,15 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         rec.text = text;
+      }
+      // tags only move when the client sent them: an older client patching a
+      // title must not silently strip the filing off the record
+      if (body.tags !== undefined) {
+        if (!Array.isArray(body.tags)) {
+          sendJson(res, 400, { error: "tags must be an array of strings" });
+          return;
+        }
+        rec.tags = followupTags({ tags: body.tags });
       }
       await writeFollowup(rec);
       sendJson(res, 200, { followup: { ...followupMeta(rec), text: rec.text } });

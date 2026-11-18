@@ -1188,6 +1188,38 @@ try {
   check("app.js un-keeps a follow-up on a second press", appJs.includes("async function unsaveFollowup"));
   check("style.css paints the pressed Follow-up control", css.includes(".turn-action.kept {"));
 
+  // Favorites is gone: the sidebar's third view used to be a flat list of
+  // starred sessions, and leaving any of it behind would show a dead tab.
+  check("Favorites is not a sidebar view", !appJs.includes('"favorites"') && !html.includes('id="tab-favorites"'));
+  check("the header has no star control", !html.includes('id="btn-favorite"') && !appJs.includes("toggleFavorite"));
+  check("no star styling survives in style.css", !css.includes("#btn-favorite") && !css.includes(".s-unstar"));
+
+  // The Follow-ups view is a tree by tag: the grouping has to include the
+  // untagged leftovers (a follow-up with no tag must not disappear), and the
+  // body of a group is only built when the branch is open.
+  check("app.js groups follow-ups by tag", appJs.includes("function followupTree(") && appJs.includes("const UNTAGGED ="));
+  check("a tag branch folds", appJs.includes("function followupTagGroup(") && appJs.includes("function setFollowupTagClosed("));
+  check(
+    "a branch that is closed renders no rows",
+    /open \? el\("div", \{ class: "fu-group-items" \}/.test(appJs)
+  );
+  check(
+    "follow-up tags are edited on the document",
+    appJs.includes("function followupTagBar(") &&
+      appJs.includes("function updateFollowupTags(") &&
+      appJs.includes('id: "fu-tag-input"')
+  );
+  check(
+    "a tag save repaints the chips, not the input",
+    appJs.includes("function repaintFollowupTagBar(") && appJs.includes('$("#fu-tag-chips")?.replaceChildren')
+  );
+  check(
+    "tag writes for one follow-up are serialised",
+    appJs.includes("const followupTagWrites = new Map()") && appJs.includes("function queueFollowupTagWrite(")
+  );
+  check("the filter matches on tags too", appJs.includes("function followupMatches("));
+  check("style.css draws the tag tree", css.includes(".fu-group-head {") && css.includes(".s-tag {"));
+
   // The extension dialog used to be one slot: two sessions asking at once meant
   // the second record overwrote the first on screen, and the displaced question
   // had no button anywhere — its session blocked with nothing to see. It is a
@@ -1390,6 +1422,58 @@ try {
   const removed = await fetch(`${BASE}/api/followups/${followupId}`, { method: "DELETE" });
   check("/api/followups deletes a summary", removed.ok && !fs.existsSync(savedFile), `got ${removed.status}`);
   check("deleting a follow-up twice is not an error", (await fetch(`${BASE}/api/followups/${followupId}`, { method: "DELETE" })).ok);
+
+  // Tags are the sidebar tree's branches, so they have to survive a round trip,
+  // normalise away the near-duplicates that would split a branch in two, and
+  // never be stripped by an edit that did not mention them.
+  const tagged = await (await fetch(`${BASE}/api/followups`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "Tagged", text: "body text", tags: ["  Alpha ", "alpha", "Beta", ""] }),
+  })).json();
+  const taggedId = tagged.followup?.id;
+  check(
+    "a saved follow-up keeps its tags, trimmed and de-duplicated",
+    Array.isArray(tagged.followup?.tags) &&
+      tagged.followup.tags.length === 2 &&
+      tagged.followup.tags[0] === "Alpha" &&
+      tagged.followup.tags[1] === "Beta",
+    JSON.stringify(tagged.followup).slice(0, 200)
+  );
+  const relistedTags = await (await fetch(`${BASE}/api/followups`)).json();
+  const listedTags = relistedTags.followups.find((f) => f.id === taggedId);
+  check("the list carries a follow-up's tags", Array.isArray(listedTags?.tags) && listedTags.tags.includes("Beta"));
+  const openedTags = await (await fetch(`${BASE}/api/followups/${taggedId}`)).json();
+  check("the record stores its tags", Array.isArray(openedTags.followup?.tags) && openedTags.followup.tags.length === 2);
+  const retagged = await (await fetch(`${BASE}/api/followups/${taggedId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tags: ["Beta", "Gamma", "gamma "] }),
+  })).json();
+  check(
+    "/api/followups PATCH rewrites tags",
+    Array.isArray(retagged.followup?.tags) && retagged.followup.tags.join(",") === "Beta,Gamma",
+    JSON.stringify(retagged.followup?.tags)
+  );
+  const untitled = await (await fetch(`${BASE}/api/followups/${taggedId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "Renamed without tags" }),
+  })).json();
+  check(
+    "a title-only edit leaves the tags alone",
+    Array.isArray(untitled.followup?.tags) && untitled.followup.tags.join(",") === "Beta,Gamma",
+    JSON.stringify(untitled.followup?.tags)
+  );
+  check(
+    "/api/followups PATCH rejects a non-array tag list",
+    (await fetch(`${BASE}/api/followups/${taggedId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: "Beta" }),
+    })).status === 400
+  );
+  await fetch(`${BASE}/api/followups/${taggedId}`, { method: "DELETE" });
 
   const sessions = await (await fetch(`${BASE}/api/sessions`)).json();
   check("/api/sessions returns a list", Array.isArray(sessions.sessions));

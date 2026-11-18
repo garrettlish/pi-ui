@@ -76,8 +76,8 @@ SDK instead of bridging RPC is what makes it fast:
 ### Sessions, search and follow-ups
 
 - The sidebar lists every session under the pi session directory with title, repository, message
-  count, cost and last activity, in four views: **Recent**, **Workspaces** (project → session),
-  **Favorites** and **Follow-ups**.
+  count, cost and last activity, in three views: **Recent**, **Workspaces** (project → session) and
+  **Follow-ups**.
 - Opening a session rebuilds the transcript from its active branch, including history from before a
   compaction. Switches are optimistic and cached, so re-opening costs one incremental read.
 - Each open session keeps its own `AgentSession` and its own run: switching sessions never stops a
@@ -85,9 +85,11 @@ SDK instead of bridging RPC is what makes it fast:
 - Search (`Cmd/Ctrl`+`K`) has three scopes: **Prompts** (only what you typed), **Summary** (the
   answer each run concluded with) and **Everything** (every prompt, response, tool request and tool
   result, including subagent child output). Clicking a hit jumps to the occurrence.
-- **Follow-up** saves a run's concluding answer under `~/.pi/followups`; the tab lists, edits,
-  copies and deletes them without replaying any session. **Copy** puts an answer on the clipboard as
-  rich text *and* Markdown at once.
+- **Follow-up** saves a run's concluding answer under `~/.pi/followups`; the tab groups them into a
+  tree by **tag**, and lists, edits, copies and deletes them without replaying any session. Tags are
+  added or removed on the open document and persist with the file, so the same summary can be filed
+  under several branches. **Copy** puts an answer on the clipboard as rich text *and* Markdown at
+  once.
 
 ### Composer and appearance
 
@@ -236,7 +238,7 @@ has, via `preflightResult`. Streaming continues over SSE.
 | `GET /api/followups` | List saved follow-ups: metadata only, no bodies |
 | `POST /api/followups` | Save one summary |
 | `GET /api/followups/<id>` | One saved follow-up, including its Markdown `text` |
-| `PATCH /api/followups/<id>` | Rewrite a saved follow-up's title and body |
+| `PATCH /api/followups/<id>` | Rewrite a saved follow-up's title, body or `tags` |
 | `DELETE /api/followups/<id>` | Delete a saved follow-up |
 | `GET /api/search?q=&limit=&scope=<all\|prompts\|summary>` | Full-text search across every session |
 | `GET /api/browse?path=<dir>` | Directory listing for the workspace picker |

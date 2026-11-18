@@ -87,7 +87,9 @@ function onActivate(fn) {
 // state
 // ---------------------------------------------------------------------------
 const TAB_KEY = "piweb-sidebar-tab";
-const SIDEBAR_TABS = ["recent", "workspaces", "favorites", "followups"];
+const SIDEBAR_TABS = ["recent", "workspaces", "followups"];
+/** which follow-up tag groups the user folded shut in the sidebar tree */
+const FOLLOWUP_TAGS_CLOSED_KEY = "piweb-followup-tags-closed";
 const SIDEBAR_COLLAPSED_KEY = "piweb-sidebar-collapsed";
 const PROMPT_HISTORY_KEY = "piweb-prompt-history";
 const PROMPT_HISTORY_MAX = 200;
@@ -142,8 +144,11 @@ const state = {
   cwd: null,
   /** selected workspace cwd; null = workspace list view; undefined = not yet initialized */
   workspace: undefined,
+  /** saved follow-ups whose tag group is collapsed in the sidebar, by tag name;
+   *  a tree whose branches forgot their state would re-open on every render */
+  followupTagsClosed: closedFollowupTags(),
   /** sidebar view: "recent" = flat list across all workspaces, "workspaces" = two-level,
-   *  "favorites" = flat list of sessions starred by the user, "followups" = saved summaries */
+   *  "followups" = saved summaries, grouped by tag */
   sidebarTab: SIDEBAR_TABS.includes(localStorage.getItem(TAB_KEY)) ? localStorage.getItem(TAB_KEY) : "recent",
 };
 
@@ -3072,42 +3077,7 @@ function renderHeader() {
 
   renderModelPicker();
   renderThinkingPicker();
-  renderFavoriteButton();
 }
-
-/** Header star: filled + "remove" label when the current session is starred,
- *  outlined + "add" when it is not. Hidden for an unsaved new session, which
- *  has no file to star yet. */
-function renderFavoriteButton() {
-  const btn = $("#btn-favorite");
-  const file = state.sessionFile;
-  btn.classList.toggle("hidden", !file);
-  if (!file) {
-    btn.dataset.sig = "";
-    return;
-  }
-  // renderHeader runs on nearly every event; only rebuild when the starred
-  // state of this session actually changed, so an in-progress click is not
-  // swapped out from under the pointer
-  const on = isFavorite(file);
-  const sig = `${file}#${on}`;
-  if (btn.dataset.sig === sig) return;
-  btn.dataset.sig = sig;
-  btn.replaceChildren(...htmlFragment(on ? STAR_ICON : STAR_OUTLINE_ICON));
-  btn.classList.toggle("starred", on);
-  btn.setAttribute("aria-pressed", String(on));
-  const label = on ? "Remove from Favorites" : "Add to Favorites";
-  btn.title = label;
-  btn.setAttribute("aria-label", label);
-}
-
-$("#btn-favorite").addEventListener("click", () => {
-  if (!state.sessionFile) return;
-  const added = toggleFavorite(state.sessionFile);
-  renderFavoriteButton();
-  renderSidebar();
-  toast(added ? "added to favorites" : "removed from favorites");
-});
 
 /** Header label of a picker button: the current value, or a placeholder when
  *  nothing is selected yet. */
@@ -4077,11 +4047,6 @@ function truncate(s, n) {
 
 const WS_KEY = "piweb-workspace";
 const WS_PINNED_KEY = "piweb-pinned-workspaces";
-/** session files (absolute paths) the user starred; rendered by the Favorites tab */
-const FAV_KEY = "piweb-favorites";
-/** star glyphs: filled = starred, outlined = not starred */
-const STAR_ICON = `<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.8.85-4.2 4.1 1 5.8-5.2-2.75-5.2 2.75 1-5.8-4.2-4.1 5.8-.85z"/></svg>`;
-const STAR_OUTLINE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.8.85-4.2 4.1 1 5.8-5.2-2.75-5.2 2.75 1-5.8-4.2-4.1 5.8-.85z"/></svg>`;
 /** a bookmark: keeping a summary is a save, not a star */
 const FOLLOWUP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4-6.5 4V5a1 1 0 0 1 1-1z"/></svg>`;
 const COPY_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H5.5A1.5 1.5 0 0 0 4 5.5v8A1.5 1.5 0 0 0 5.5 15"/></svg>`;
@@ -4141,30 +4106,6 @@ function pinWorkspace(cwd) {
   }
 }
 
-/** session files the user starred, newest star first */
-function favoriteFiles() {
-  try {
-    const arr = JSON.parse(localStorage.getItem(FAV_KEY) || "[]");
-    return Array.isArray(arr) ? arr.filter((p) => typeof p === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function isFavorite(file) {
-  return !!file && favoriteFiles().includes(file);
-}
-
-/** star / unstar a session file; returns true when it was added */
-function toggleFavorite(file) {
-  const favs = favoriteFiles();
-  const at = favs.indexOf(file);
-  if (at === -1) favs.unshift(file); // newest star first; the order is stable, so rows do not jump around
-  else favs.splice(at, 1);
-  localStorage.setItem(FAV_KEY, JSON.stringify(favs));
-  return at === -1;
-}
-
 /** group sessions by cwd -> [{ cwd, name, sessions, last, cost }] sorted by recency; merges pinned dirs */
 function workspaces() {
   const map = new Map();
@@ -4206,12 +4147,236 @@ function sessionMatches(s, filter, { includeCwd = true } = {}) {
   );
 }
 
-/** One sidebar row for a saved follow-up: its title, the workspace it came from,
- *  when it was kept, and a delete control. Opening it reads one JSON file — no
- *  session is loaded and no pi process is involved. */
-function followupRow(f) {
+/** Tags the user folded shut, read once from localStorage */
+function closedFollowupTags() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(FOLLOWUP_TAGS_CLOSED_KEY) || "[]");
+    return new Set(Array.isArray(arr) ? arr.filter((t) => typeof t === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function setFollowupTagClosed(tag, closed) {
+  if (closed) state.followupTagsClosed.add(tag);
+  else state.followupTagsClosed.delete(tag);
+  localStorage.setItem(FOLLOWUP_TAGS_CLOSED_KEY, JSON.stringify([...state.followupTagsClosed]));
+}
+
+/** Filter match for a follow-up: its title, the session it came from, and the
+ *  tags it is filed under. A tag is why the user can find the branch, so typing
+ *  it into the one filter box has to reach the follow-ups inside it. */
+function followupMatches(f, filter) {
+  return (
+    !filter ||
+    (f.title || "").toLowerCase().includes(filter) ||
+    (f.sessionTitle || "").toLowerCase().includes(filter) ||
+    followupTagsOf(f).some((t) => t.toLowerCase().includes(filter))
+  );
+}
+
+/** Group key for the follow-ups that carry no tag. A NUL byte cannot be typed
+ *  into the tag input, so no real tag can ever collide with it. */
+const UNTAGGED = "\u0000untagged";
+
+/** Group follow-ups by tag for the sidebar tree, so a follow-up filed under two
+ *  tags appears under both. Groups are alphabetical with "Untagged" last — it is
+ *  the leftovers pile, not a subject — and each group keeps the list's own
+ *  newest-first order. */
+function followupTree(followups) {
+  const groups = new Map();
+  const ensure = (tag) => {
+    let g = groups.get(tag);
+    if (!g) groups.set(tag, (g = { tag, items: [] }));
+    return g;
+  };
+  for (const f of followups) {
+    const tags = followupTagsOf(f);
+    if (!tags.length) ensure(UNTAGGED).items.push(f);
+    else for (const tag of tags) ensure(tag).items.push(f);
+  }
+  return [...groups.values()].sort((a, b) => {
+    if (a.tag === UNTAGGED) return 1; // the leftovers pile goes last
+    if (b.tag === UNTAGGED) return -1;
+    return a.tag.localeCompare(b.tag, undefined, { sensitivity: "base" });
+  });
+}
+
+/** Sidebar display of a row's tags: the first few as chips and a "+N" for the
+ *  rest, because a row is one line of filing information, not the whole list */
+const ROW_TAGS_MAX = 3;
+
+function rowTagChips(tags) {
+  const shown = tags.slice(0, ROW_TAGS_MAX);
+  const rest = tags.length - shown.length;
+  return el(
+    "div",
+    { class: "s-tags" },
+    ...shown.map((t) => el("span", { class: "s-tag", text: t })),
+    rest > 0 ? el("span", { class: "s-tag more", title: tags.join(", "), text: `+${rest}` }) : null
+  );
+}
+
+/** Every tag already in use, for the add-tag input's suggestions: filing is
+ *  only useful when the second follow-up can reach the branch the first one
+ *  created, and typing a name from memory is how near-duplicates appear. */
+function knownFollowupTags() {
+  const byKey = new Map();
+  for (const f of state.followups) {
+    for (const t of Array.isArray(f.tags) ? f.tags : []) {
+      if (!t) continue;
+      const key = t.toLowerCase();
+      if (!byKey.has(key)) byKey.set(key, t);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+function followupTagsOf(rec) {
+  return Array.isArray(rec?.tags) ? rec.tags.filter(Boolean) : [];
+}
+
+/** One removable chip per tag of the open follow-up */
+function followupTagChips(rec) {
+  return followupTagsOf(rec).map((t) =>
+    el(
+      "span",
+      { class: "s-tag fu-tag" },
+      el("span", { text: t }),
+      el("button", {
+        class: "fu-tag-remove",
+        title: `Remove the tag "${t}"`,
+        "aria-label": `Remove the tag ${t}`,
+        text: "✕",
+        onclick: () => updateFollowupTags(rec, followupTagsOf(rec).filter((x) => x !== t)),
+      })
+    )
+  );
+}
+
+/** Suggestions for the add-tag input, minus the tags this follow-up already
+ *  carries: offering a name that does nothing is noise, not help. */
+function followupTagSuggestions(rec) {
+  const have = new Set(followupTagsOf(rec).map((t) => t.toLowerCase()));
+  return knownFollowupTags()
+    .filter((t) => !have.has(t.toLowerCase()))
+    .map((t) => el("option", { value: t }));
+}
+
+/** The tag bar of the open follow-up: one chip per tag, each removable, plus an
+ *  input that files the follow-up under a new one. Tags are saved on the spot
+ *  rather than with the body edit — a tag is filing, not prose, and the sidebar
+ *  tree is the thing it changes. */
+function followupTagBar(rec) {
+  const input = el("input", {
+    class: "fu-tag-input",
+    id: "fu-tag-input",
+    list: "fu-tag-suggestions",
+    placeholder: "add a tag…",
+    "aria-label": "Add a tag",
+    maxlength: "40",
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return; // IME candidate confirmation
+    if (e.key !== "Enter" && e.key !== ",") return;
+    e.preventDefault();
+    e.stopPropagation(); // Enter must not reach the document-level send/close handlers
+    addFollowupTag(rec, input);
+  });
+  return el(
+    "div",
+    { class: "fu-tags", id: "fu-tags" },
+    el("span", { class: "fu-tags-label", text: "Tags" }),
+    el("span", { class: "fu-tag-chips", id: "fu-tag-chips" }, ...followupTagChips(rec)),
+    input,
+    el("datalist", { id: "fu-tag-suggestions" }, ...followupTagSuggestions(rec))
+  );
+}
+
+/** Repaint the chips and the suggestions in place. The input is deliberately
+ *  left alone: a saved tag must not take focus (or a part-typed next tag) away
+ *  from the field the user is still working in, and a body edit in progress
+ *  must survive a tag change. */
+function repaintFollowupTagBar(rec) {
+  $("#fu-tag-chips")?.replaceChildren(...followupTagChips(rec));
+  const dl = $("#fu-tag-suggestions");
+  if (dl) dl.replaceChildren(...followupTagSuggestions(rec));
+}
+
+function addFollowupTag(rec, input) {
+  // a leading "#" is how people write a tag, but the chip is the tag itself
+  const tag = input.value.replace(/^#+/, "").replace(/\s+/g, " ").trim().slice(0, 40);
+  input.value = "";
+  if (!tag) return;
+  const tags = followupTagsOf(rec);
+  if (tags.some((t) => t.toLowerCase() === tag.toLowerCase())) return;
+  updateFollowupTags(rec, [...tags, tag]);
+}
+
+/** Serialises writes per follow-up: two quick presses used to race, and the
+ *  slower one could land last and undo the other. A chain makes the last press
+ *  the last write. */
+const followupTagWrites = new Map();
+
+function queueFollowupTagWrite(id, task) {
+  const prev = followupTagWrites.get(id) || Promise.resolve();
+  const next = prev.then(task, task);
+  followupTagWrites.set(
+    id,
+    next.catch(() => {})
+  );
+  return next;
+}
+
+/** Show a tag list on the open document without waiting for the server, and
+ *  keep the object the sidebar reads in step with it. */
+function setFollowupTagsLocally(rec, tags) {
+  rec.tags = tags;
+  if (state.openFollowup && state.openFollowup.id === rec.id) state.openFollowup.tags = tags;
+  repaintFollowupTagBar(rec);
+}
+
+/** PATCH just the tags. The chips repaint immediately — filing is local until
+ *  the server disagrees — and each queued write sends the list it was asked
+ *  for, not whatever the record holds when its turn comes: reading at send time
+ *  let a later press overwrite an earlier one's payload. Only the newest write
+ *  may adopt the server's echo (which normalises whitespace and duplicates), so
+ *  a slow reply cannot undo the tag the user pressed after it. */
+function updateFollowupTags(rec, tags) {
+  const desired = tags.slice();
+  const before = followupTagsOf(rec);
+  setFollowupTagsLocally(rec, desired);
+  return queueFollowupTagWrite(rec.id, async () => {
+    try {
+      const data = await api(`/api/followups/${encodeURIComponent(rec.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: desired }),
+      });
+      const saved = data.followup;
+      if (saved && rec.tags === desired) {
+        setFollowupTagsLocally(rec, followupTagsOf(saved));
+        await loadFollowups();
+      }
+    } catch (err) {
+      // put the chips back the way they were: a tag that did not save must not
+      // keep looking filed in the tree. A newer press owns the state by now, so
+      // leave that one alone.
+      if (rec.tags === desired) setFollowupTagsLocally(rec, before);
+      toast(`could not save tags: ${err.message}`, "error");
+    }
+  });
+}
+
+/** One sidebar row for a saved follow-up: its title, its other tags, the
+ *  workspace it came from, when it was kept, and a delete control. Opening it
+ *  reads one JSON file — no session is loaded and no pi process is involved.
+ *  `omitTag` drops the tag of the branch the row sits under: repeating it on
+ *  every row of that branch says nothing the branch header has not said. */
+function followupRow(f, { omitTag = null } = {}) {
   const active = state.openFollowup?.id === f.id;
   const repo = wsLabel(f.cwd) || "(no workspace)";
+  const tags = followupTagsOf(f).filter((t) => t !== omitTag);
   return el(
     "div",
     {
@@ -4226,6 +4391,7 @@ function followupRow(f) {
       { class: "s-title" },
       el("span", { class: "s-title-text", text: f.title || "(untitled follow-up)" })
     ),
+    tags.length ? rowTagChips(tags) : null,
     el("div", { class: "s-repo", title: f.cwd || repo, text: repo }),
     el(
       "div",
@@ -4245,6 +4411,44 @@ function followupRow(f) {
         onkeydown: (e) => e.stopPropagation(),
       })
     )
+  );
+}
+
+/** A tree branch: the tag, how many follow-ups sit under it, and a caret that
+ *  folds it. The caret is a real button so the branch is keyboard-operable; the
+ *  header row is not a drop target or a link — it only folds. Untagged renders
+ *  as a plain heading: it is not a subject the user chose, and there is nowhere
+ *  to file its entries away to, so folding it would only hide work. */
+function followupTagGroup({ tag, items }) {
+  const untagged = tag === UNTAGGED;
+  const label = untagged ? "Untagged" : tag;
+  const open = untagged || !state.followupTagsClosed.has(tag);
+  return el(
+    "div",
+    { class: "fu-group" },
+    untagged
+      ? el(
+          "div",
+          { class: "fu-group-head untagged", title: "Follow-ups with no tag" },
+          el("span", { class: "fu-group-name", text: label }),
+          el("span", { class: "fu-group-count", text: String(items.length) })
+        )
+      : el(
+          "button",
+          {
+            class: "fu-group-head",
+            "aria-expanded": String(open),
+            title: `Follow-ups tagged "${tag}"`,
+            onclick: () => {
+              setFollowupTagClosed(tag, open);
+              renderSidebar();
+            },
+          },
+          el("span", { class: `fu-caret${open ? " open" : ""}`, "aria-hidden": "true", text: "›" }),
+          el("span", { class: "fu-group-name", text: label }),
+          el("span", { class: "fu-group-count", text: String(items.length) })
+        ),
+    open ? el("div", { class: "fu-group-items" }, ...items.map((f) => followupRow(f, { omitTag: untagged ? null : tag }))) : null
   );
 }
 
@@ -4385,15 +4589,14 @@ async function deleteFollowup(id, { quiet = false } = {}) {
 
 /** One sidebar row for a session. `showWorkspace` picks the timestamp that
  *  reads best in a flat list (last activity) versus a workspace-scoped one
- *  (the session's own last timestamp); `unstar` adds the remove-from-favorites
- *  control (Favorites tab).
+ *  (the session's own last timestamp).
  *
  *  Three blocks: a title of up to two lines, then the repository on a line of
  *  its own, then the metadata. The repository used to share its line with the
  *  date and message count, which cut long `owner/name` pairs to an unusable
  *  stub; the title used to be a single ellipsized line, which hid the subject
  *  of most sessions. */
-function sessionRow(s, { showWorkspace = false, unstar = false } = {}) {
+function sessionRow(s, { showWorkspace = false } = {}) {
   const active = s.file === state.sessionFile;
   const repo = wsLabel(s.cwd) || "(unknown)";
   return el(
@@ -4417,24 +4620,7 @@ function sessionRow(s, { showWorkspace = false, unstar = false } = {}) {
       { class: "s-meta" },
       el("span", { text: fmtDate(showWorkspace ? sessionLastMs(s) : s.lastTimestamp ? Date.parse(s.lastTimestamp) : s.mtime) }),
       el("span", { text: `${s.messages} msg` }),
-      s.cost ? el("span", { text: fmtCost(s.cost) }) : null,
-      unstar
-        ? el("button", {
-            class: "s-unstar",
-            title: "Remove from Favorites",
-            "aria-label": "Remove from Favorites",
-            html: STAR_ICON,
-            onclick: (e) => {
-              // the row itself opens the session; the star must not
-              e.stopPropagation();
-              toggleFavorite(s.file);
-              renderSidebar();
-              renderHeader();
-              toast("removed from favorites");
-            },
-            onkeydown: (e) => e.stopPropagation(),
-          })
-        : null
+      s.cost ? el("span", { text: fmtCost(s.cost) }) : null
     )
   );
 }
@@ -4446,7 +4632,7 @@ function renderSidebar() {
   const crumb = $("#sidebar-crumb");
 
   // view tabs: "recent" (flat, all workspaces), "workspaces" (two-level),
-  // "favorites" (flat, starred only), "followups" (saved summaries)
+  // "followups" (saved summaries, grouped by tag)
   const tab = state.sidebarTab;
   for (const name of SIDEBAR_TABS) {
     const btn = $(`#tab-${name}`);
@@ -4454,33 +4640,12 @@ function renderSidebar() {
     btn.setAttribute("aria-selected", String(tab === name));
   }
 
-  if (tab === "favorites") {
-    // flat list of starred sessions, in star order (newest star first); a
-    // starred file whose session disappeared from disk is simply not rendered
-    crumb.classList.add("hidden");
-    const favs = favoriteFiles();
-    const byFile = new Map(state.sessions.map((s) => [s.file, s]));
-    const starred = favs.map((f) => byFile.get(f)).filter((s) => s && sessionMatches(s, filter));
-    for (const s of starred) list.append(sessionRow(s, { showWorkspace: true, unstar: true }));
-    if (!starred.length) {
-      list.append(
-        el("div", {
-          class: "list-empty",
-          text: favs.length ? "No favorites match" : "No favorites yet — star a session from the header",
-        })
-      );
-    }
-    return;
-  }
-
   if (tab === "followups") {
-    // flat list of saved summaries, newest first; each row opens its own file —
-    // no session is loaded and no pi process is involved
+    // a tree of saved summaries: one branch per tag, each row opening its own
+    // file — no session is loaded and no pi process is involved
     crumb.classList.add("hidden");
-    const hits = state.followups.filter(
-      (f) => !filter || (f.title || "").toLowerCase().includes(filter) || (f.sessionTitle || "").toLowerCase().includes(filter)
-    );
-    for (const f of hits) list.append(followupRow(f));
+    const hits = state.followups.filter((f) => !filter || followupMatches(f, filter));
+    for (const group of followupTree(hits)) list.append(followupTagGroup(group));
     if (!hits.length) {
       list.append(
         el("div", {
@@ -4591,6 +4756,7 @@ function renderFollowup(rec) {
       el("span", { text: fmtDate(rec.createdAt) }),
       rec.cwd ? el("span", { text: wsLabel(rec.cwd), title: rec.cwd }) : null
     ),
+    followupTagBar(rec),
     editing
       ? el(
           "div",
@@ -5509,7 +5675,6 @@ async function switchSession(file, cwd) {
   state.leafId = cached ? cached.leafId : null;
   renderTranscript({ follow: false });
   restoreScroll(file); // this session's own offset, not the previous session's
-  renderFavoriteButton(); // the star reflects this session, not the previous one
   renderSidebar();
   syncHash();
 
@@ -5544,7 +5709,6 @@ async function switchSession(file, cwd) {
     state.leafId = prevView.leafId;
     renderTranscript({ follow: false });
     restoreScroll(prevFile);
-    renderFavoriteButton();
     renderSidebar();
     syncHash();
     toast(`switch failed: ${err.message}`, "error");
@@ -6852,7 +7016,6 @@ function selectTab(tab) {
 }
 $("#tab-workspaces").addEventListener("click", () => selectTab("workspaces"));
 $("#tab-recent").addEventListener("click", () => selectTab("recent"));
-$("#tab-favorites").addEventListener("click", () => selectTab("favorites"));
 $("#tab-followups").addEventListener("click", () => {
   selectTab("followups");
   loadFollowups();
