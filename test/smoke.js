@@ -901,7 +901,7 @@ try {
   check("page links the stylesheet", html.includes('href="/style.css"'));
   check("page loads the frontend script", html.includes('src="/app.js"'));
 
-  for (const asset of ["/style.css", "/app.js", "/favicon.svg", "/vendor/prism.min.js"]) {
+  for (const asset of ["/style.css", "/app.js", "/favicon.svg", "/vendor/prism.min.js", "/vendor/mermaid.min.js"]) {
     const res = await fetch(`${BASE}${asset}`);
     check(`GET ${asset} returns 200`, res.status === 200, `got ${res.status}`);
   }
@@ -922,6 +922,19 @@ try {
     check("the bundle carries the diff grammar", body.includes("languages.diff"));
     check("prism.min.js loads before app.js", html.indexOf("/vendor/prism.min.js") < html.indexOf('/app.js"'));
     check("Prism auto-highlight is disabled", /prism\.min\.js"[^>]*data-manual/.test(html));
+  }
+
+  // Mermaid renders the ```mermaid fences in an answer. It is far too large to
+  // parse on every page load, so app.js injects it on the first diagram; the
+  // bundle still has to be served from a bare checkout.
+  {
+    const mermaid = await fetch(`${BASE}/vendor/mermaid.min.js`);
+    check("the vendored Mermaid bundle is offered", mermaid.status === 200, `got ${mermaid.status}`);
+    check("the Mermaid bundle is served as JavaScript", /javascript/.test(mermaid.headers.get("content-type") || ""));
+    const body = await mermaid.text();
+    check("the Mermaid bundle registers its global", body.includes("globalThis[\"mermaid\"]"));
+    check("the Mermaid bundle carries the flowchart renderer", body.includes("flowchart"));
+    check("mermaid.min.js is not linked from index.html", !html.includes("/vendor/mermaid.min.js"));
   }
 
   // A file:// link used to fall through the inline parser and render as raw
@@ -956,6 +969,47 @@ try {
   // ordered list that starts at 3 must not be renumbered to 1.
   check("app.js nests lists by indentation", appJs.includes("function renderList(lines, start)") && appJs.includes("stack.push({ indent: item.indent, tag })"));
   check("app.js keeps an ordered list's start number", appJs.includes('` start='));
+
+  // An inline triple backtick is not a fence, but it matches the fence *prefix*:
+  // "```foo = 1```, so …" fails the closing-fence regex and the paragraph loop
+  // skips it for the same reason, so neither branch consumed the line and
+  // renderMarkdown spun forever — the whole tab froze on a session containing
+  // one such line. Every branch that can decline a line needs a fallback.
+  check(
+    "renderMarkdown always consumes a line it cannot classify",
+    /if \(!buf\.length\) buf\.push\(inlineMd\(lines\[i\+\+\]\)\)/.test(appJs)
+  );
+
+  // ```mermaid is a diagram, not a code sample. Mermaid is async and its bundle
+  // is 3.4 MB, so the fence renders a placeholder at parse time and is painted
+  // afterwards — never a blocking script in index.html.
+  check("app.js recognises a mermaid fence", appJs.includes("function isMermaidFence(") && appJs.includes('name === "mermaid"'));
+  check("a mermaid fence becomes a placeholder, not a code block", /md-mermaid" data-mermaid=/.test(appJs));
+  check("mermaid is loaded on demand, not from index.html", appJs.includes("function loadMermaid(") && !html.includes("/vendor/mermaid.min.js"));
+  check("every markdown render site hydrates diagrams", (appJs.match(/hydrateMermaid\(/g) || []).length >= 4);
+  check("a diagram that cannot be drawn keeps its source", appJs.includes("diagram could not be drawn — showing the source"));
+  check("style.css frames a diagram", css.includes(".assistant-text .md-mermaid {"));
+  // app.js is a classic script, so a top-level `function mermaid()` becomes
+  // window.mermaid and shadows the bundle's own global of that name — the
+  // "already loaded?" check then passes before the script is ever fetched, and
+  // every diagram silently degrades to its source. The helper must stay renamed
+  // AND must validate the shape, so a same-named global cannot be mistaken for
+  // a loaded bundle.
+  check(
+    "app.js does not shadow the vendored mermaid global",
+    !/^function mermaid\(/m.test(appJs) && !/^\s*function mermaid\(\)/m.test(appJs)
+  );
+  check("app.js validates the mermaid API shape", /function mermaidApi\(\)[\s\S]{0,400}typeof g\?\.render === "function"/.test(appJs));
+  check("a diagram draw is queued, not overlapped", appJs.includes("let mermaidQueue = Promise.resolve()"));
+  // Mermaid scopes its whole inline stylesheet on the id it is handed
+  // (`#mmd-3 .node rect{…}`), so an SVG inserted without that id loses every
+  // rule and the diagram renders as black boxes on a black background. The id
+  // must be unique per call and must survive into the DOM.
+  check(
+    "the mermaid render id reaches the DOM",
+    appJs.includes("const id = `mmd-${nextMermaidId()}`") && appJs.includes("m.render(id, src)")
+  );
+  check("app.js does not strip the mermaid svg id", !appJs.includes('removeAttribute("id")'));
 
   // A hung child process was the one failure the transcript could not show: a
   // bash call whose command never returns kept the "running" chip forever, so

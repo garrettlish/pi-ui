@@ -170,6 +170,19 @@ renders plain instead. Prism is vendored into `public/vendor/prism.min.js` (34 K
 gzipped) rather than declared as a dependency, so a bare checkout still runs;
 `scripts/vendor-prism.sh` regenerates it.
 
+### A code fence that says `mermaid` is a diagram
+
+` ```mermaid ` fences are drawn as SVG by [Mermaid](https://mermaid.js.org/), vendored into
+`public/vendor/mermaid.min.js` (3.4 MB raw, ~1 MB gzipped) and regenerated with
+`scripts/vendor-mermaid.sh`. It is **not** linked from `index.html`: `app.js` injects it the first
+time a transcript actually contains a diagram, so a session without one pays nothing for it.
+
+Because Mermaid is async and `renderMarkdown` is a pure string function, the fence renders as a
+placeholder carrying its source, and `hydrateMermaid()` paints it once the nodes are in the document
+— at every site that renders Markdown (transcript, follow-up body, subagent output). A syntax error
+is expected while a turn streams, so it leaves the source block plus a note rather than an error
+state. Diagrams are redrawn on a palette switch, since Mermaid bakes colors into the SVG.
+
 ### Images are offloaded, not shipped
 
 A real 30 MB session was **28.7 MB of base64 PNG data** across 36 image blocks, and 1.7 MB of
@@ -193,6 +206,7 @@ data and drops the oldest beyond that.
 | `sdk/ui-context.js` | The `ExtensionUIContext` the RPC bridge used to provide over stdout |
 | `public/index.html`, `public/app.js`, `public/style.css` | The frontend shell, state and rendering, and the design tokens |
 | `public/vendor/prism.min.js` | Syntax highlighting grammars, vendored |
+| `public/vendor/mermaid.min.js` | `mermaid` fences drawn as SVG, vendored and loaded on demand |
 
 `switch_session` inside a single process invalidates every extension context that captured `ctx`,
 which is why the subprocess design existed at all. pi-ui keeps the same pool — a session per session

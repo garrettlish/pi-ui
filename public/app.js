@@ -484,6 +484,199 @@ function prismGrammar(lang) {
   const grammar = prism()?.languages[name];
   return grammar && name !== "plain" && name !== "text" ? { name, grammar } : null;
 }
+/** Fence info strings that name a Mermaid diagram rather than a code block.
+ *  "mermaid" is the documented one; "mmd" is what some people type. */
+function isMermaidFence(lang) {
+  const name = String(lang || "").toLowerCase();
+  return name === "mermaid" || name === "mmd";
+}
+
+/** The vendored Mermaid API, or null while the script is still absent.
+ *
+ *  NOT named `mermaid`: app.js is a classic script, so a top-level function
+ *  declaration here lands on the global object — and so does the bundle's own
+ *  `globalThis["mermaid"] = …`. A helper called `mermaid()` therefore made
+ *  `window.mermaid` truthy before the vendor file had ever been fetched, so the
+ *  "already loaded?" check passed, the script was never injected, and every
+ *  diagram fell through to its source with `render is not a function`.
+ *
+ *  The shape check matters for the same reason: it accepts only the API object,
+ *  so any other global that happens to be called `mermaid` cannot be mistaken
+ *  for a loaded bundle. */
+function mermaidApi() {
+  const g = /** @type {any} */ (window).mermaid;
+  return typeof g?.render === "function" && typeof g?.initialize === "function" ? g : null;
+}
+
+/** Mermaid's theme, read from the live palette.
+ *
+ *  Mermaid bakes its colors into the SVG, and none of its stock themes is
+ *  this page: "default" is a lavender that clashes with all six palettes, and
+ *  "dark" is not the same ink as `night`. The `base` theme exists to be
+ *  overridden, so the values come from the same custom properties the prose
+ *  around the diagram uses — one definition of the palette, not two. */
+function mermaidConfig() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (cs.getPropertyValue(name) || "").trim() || fallback;
+  const surface = v("--surface", "#ffffff");
+  const text = v("--text", "#1a1a1a");
+  const border = v("--border-strong", "#c9c9cf");
+  return {
+    startOnLoad: false,
+    theme: "base",
+    themeVariables: {
+      background: v("--page", surface),
+      mainBkg: surface,
+      // nodes take the accent tint so a diagram reads as one unit against the
+      // page, and cluster labels stay ink-colored rather than accent-colored
+      primaryColor: v("--accent-tint", surface),
+      primaryTextColor: text,
+      primaryBorderColor: v("--accent", border),
+      secondaryColor: surface,
+      tertiaryColor: surface,
+      lineColor: border,
+      textColor: text,
+      nodeBorder: border,
+      clusterBkg: surface,
+      clusterBorder: border,
+      edgeLabelBackground: surface,
+      titleColor: text,
+    },
+    securityLevel: "strict",
+    // A syntax error is normal here — every diagram passes through a
+    // half-written state while its turn streams. mermaid's default is to
+    // inject a red error graphic wherever it happens to be mounted, which
+    // would appear at the end of the document rather than in the fence.
+    suppressErrorRendering: true,
+    fontFamily: "inherit",
+    flowchart: { htmlLabels: false, useMaxWidth: true },
+    sequence: { useMaxWidth: true },
+  };
+}
+
+/** Load public/vendor/mermaid.min.js once, on first diagram.
+ *
+ *  It is 3.4 MB of source (~1 MB gzipped) and no ordinary page needs it, so it
+ *  is injected here rather than linked from index.html: a transcript with no
+ *  ```mermaid fence never fetches it. The promise is memoised — every diagram on
+ *  the page awaits the same script element, and a failed load is remembered too
+ *  so a broken file does not retry once per fence.
+ *  @type {Promise<boolean> | null} */
+let mermaidLoad = null;
+function loadMermaid() {
+  if (mermaidApi()) return Promise.resolve(true);
+  if (mermaidLoad) return mermaidLoad;
+  mermaidLoad = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "/vendor/mermaid.min.js";
+    tag.async = true;
+    // One flag for the whole page: mermaid's parser errors must not be thrown
+    // into the console of a reader who only opened a session.
+    tag.onload = () => {
+      const m = mermaidApi();
+      if (!m) return resolve(false);
+      try {
+        m.initialize(mermaidConfig());
+      } catch {
+        return resolve(false);
+      }
+      resolve(true);
+    };
+    tag.onerror = () => resolve(false);
+    document.head.append(tag);
+  });
+  return mermaidLoad;
+}
+
+/** Draw one `.md-mermaid` placeholder: its source becomes an SVG, or it keeps
+ *  the source and says why.
+ *
+ *  Mermaid throws on a syntax error, and a half-written diagram while a run is
+ *  streaming is *expected* to fail — so a failure is not an error state, it is
+ *  the source block it already had plus a note. Nothing is retried on an
+ *  already-rendered node, so re-rendering a transcript is cheap.
+ *
+ *  Renders are queued globally, not just per root: Mermaid keeps its theme and
+ *  layout config in module state, so two overlapping draws (a transcript
+ *  hydration and a palette redraw, say) can otherwise interleave and produce a
+ *  diagram laid out against the wrong config. */
+let mermaidQueue = Promise.resolve();
+function renderMermaidIn(root) {
+  const run = mermaidQueue.then(() => drawMermaid(root));
+  mermaidQueue = run.catch(() => {});
+  return run;
+}
+
+async function drawMermaid(root) {
+  const nodes = [...root.querySelectorAll(".md-mermaid:not([data-done])")];
+  if (!nodes.length) return;
+  const loaded = await loadMermaid();
+  if (!loaded) {
+    for (const node of nodes) {
+      node.dataset.done = "failed";
+      node.append(el("div", { class: "md-mermaid-note", text: "diagram library unavailable — showing the source" }));
+    }
+    return;
+  }
+  const m = mermaidApi();
+  if (!m) return;
+  for (const node of nodes) {
+    const src = node.getAttribute("data-mermaid") || "";
+    if (!src.trim()) continue;
+    node.dataset.done = "1";
+    const id = `mmd-${nextMermaidId()}`;
+    try {
+      // The id is load-bearing, not a label: Mermaid scopes its whole inline
+      // stylesheet on it (`#mmd-3 .node rect{…}`), so inserting the SVG without
+      // it drops every rule and the diagram renders as black boxes. It must
+      // also be unique per call — Mermaid throws on a duplicate — and it is
+      // passed in rather than derived, so a redraw starts a fresh scope.
+      const { svg } = await m.render(id, src);
+      node.replaceChildren(...htmlFragment(svg));
+      node.classList.add("rendered");
+    } catch {
+      // keep the source that is already there; a note explains the blank
+      node.append(el("div", { class: "md-mermaid-note", text: "diagram could not be drawn — showing the source" }));
+    }
+  }
+}
+
+let mermaidSeq = 0;
+function nextMermaidId() {
+  return `${++mermaidSeq}`;
+}
+
+/** Repaint every drawn diagram in the current palette.
+ *
+ *  Mermaid writes colors into the SVG it returns, so a palette switch would
+ *  otherwise leave diagrams in the old theme while all the prose around them
+ *  changed — the same reason a code block re-highlights. Each node still
+ *  carries its source in `data-mermaid`, so the redraw restores the source
+ *  block and lets the normal hydration path draw it again.
+ *
+ *  A redraw is skipped entirely when nothing has been drawn: most pages never
+ *  load Mermaid, and a theme switch on one of those must not fetch it. */
+let mermaidRepaintPending = false;
+async function redrawMermaid() {
+  const m = mermaidApi();
+  if (!m || mermaidRepaintPending) return;
+  mermaidRepaintPending = true;
+  try {
+    m.initialize(mermaidConfig());
+    const nodes = [...document.querySelectorAll(".md-mermaid")];
+    for (const node of nodes) {
+      node.classList.remove("rendered");
+      delete node.dataset.done;
+      node.replaceChildren(el("pre", { class: "mermaid-src" }, el("code", { text: node.getAttribute("data-mermaid") || "" })));
+    }
+    await renderMermaidIn(document);
+  } catch {
+    // a redraw is cosmetic; the source block above is already a readable fallback
+  } finally {
+    mermaidRepaintPending = false;
+  }
+}
+
 /** The vendored Prism global, or undefined on a page where the script is absent.
  *  Declared here so the typecheck knows its shape: Prism ships no types and the
  *  globals it registers are not part of lib.dom. */
@@ -538,6 +731,19 @@ function renderMarkdown(text) {
       while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
       const raw = rawLines.slice(bodyStart, i).join("\n");
       i++; // closing fence
+      if (isMermaidFence(fence[1])) {
+        // Mermaid is rendered by a script that is not loaded yet, and loading it
+        // is asynchronous — but renderMarkdown is a pure string function called
+        // from six places, several of them inside a loop over a whole session.
+        // So the fence becomes a placeholder carrying its source, and
+        // hydrateMermaid() paints it after the nodes are in the document. The
+        // source is escaped but not highlighted: a Mermaid author reads the
+        // diagram, and the source is the fallback when it cannot be drawn.
+        out.push(
+          `<div class="md-mermaid" data-mermaid="${esc(raw)}"><pre class="mermaid-src"><code>${buf.join("\n")}</code></pre></div>`
+        );
+        continue;
+      }
       const lang = fence[1] ? `<span class="code-lang">${esc(fence[1])}</span>` : "";
       // buf is already HTML-escaped (renderMarkdown escapes up front), which also
       // makes it attribute-safe; dataset.code decodes it back to the raw text
@@ -606,6 +812,13 @@ function renderMarkdown(text) {
       buf.push(inlineMd(lines[i]));
       i++;
     }
+    // A line can match the fence prefix without being a fence: an inline triple
+    // backtick mid-sentence ("```foo = 1```, so …") fails the closing-fence
+    // regex above, and the paragraph loop excludes it by the same prefix. Both
+    // branches decline it, `i` never advances, and renderMarkdown spins forever
+    // — which froze the whole tab on a session that contained one such line.
+    // Nothing left to try means take the line literally and move on.
+    if (!buf.length) buf.push(inlineMd(lines[i++]));
     out.push(`<p>${buf.join("<br>")}</p>`);
   }
   return out.join("");
@@ -650,6 +863,14 @@ function emailHtml(text) {
     const table = wrap.querySelector("table");
     if (table) wrap.replaceWith(table);
     else wrap.remove();
+  }
+  // A ```mermaid fence is a placeholder here: its SVG only exists on the page,
+  // and mail clients strip SVG anyway. Export the source as a preformatted
+  // block so the recipient gets something readable instead of a stray <div>
+  // carrying a megabyte of data-mermaid.
+  for (const node of [...holder.querySelectorAll(".md-mermaid")]) {
+    const code = node.querySelector(".mermaid-src code");
+    node.replaceWith(el("pre", { text: code ? code.textContent : node.getAttribute("data-mermaid") || "" }));
   }
   const apply = (node) => {
     const style = EMAIL_INLINE[node.tagName.toLowerCase()];
@@ -2101,6 +2322,7 @@ function subagentPanel(row, index, view, standalone) {
   if (row.output.trim()) {
     const out = el("div", { class: "sa-output assistant-text" });
     out.replaceChildren(...htmlFragment(renderMarkdown(row.output)));
+    hydrateMermaid(out);
     const label = el("div", { class: "tc-label sa-output-label" },
       el("span", { text: row.outputPartial ? "output (partial)" : "output" }),
       el("button", {
@@ -2333,6 +2555,7 @@ function subagentNoticePopup(message, body, runs) {
 function markdownBlock(text) {
   const block = el("div", { class: "sa-output assistant-text" });
   block.replaceChildren(...htmlFragment(renderMarkdown(String(text || ""))));
+  hydrateMermaid(block);
   return block;
 }
 
@@ -2979,6 +3202,28 @@ function renderTranscript({ follow = true } = {}) {
   // fling a user who has scrolled up back to the bottom
   if (follow && nearBottom) scrollBottom();
   updateJumpButton();
+  hydrateMermaid(transcriptEl, { follow: follow && nearBottom });
+}
+
+/** Paint any Mermaid placeholders under `root`, then keep the reader at the
+ *  bottom if they were there. Called from every place that turns Markdown into
+ *  nodes: the diagram is a placeholder at parse time (renderMarkdown is a pure
+ *  string function and Mermaid is async), so this is where it becomes a picture.
+ *  One in-flight run per root: a streaming turn re-renders often, and queueing a
+ *  second pass over the same placeholder would draw it twice. */
+const mermaidBusy = new WeakSet();
+function hydrateMermaid(root, { follow = false } = {}) {
+  if (!root || mermaidBusy.has(root)) return;
+  if (!root.querySelector(".md-mermaid:not([data-done])")) return;
+  mermaidBusy.add(root);
+  renderMermaidIn(root)
+    .catch(() => {})
+    .finally(() => {
+      mermaidBusy.delete(root);
+      // A diagram is tall: if the reader was following the stream, the SVG that
+      // just replaced a 20-line source block moved the bottom away from them.
+      if (follow && transcriptAtBottom()) scrollBottom();
+    });
 }
 
 let renderScheduled = false;
@@ -4828,6 +5073,7 @@ function renderFollowup(rec) {
     // renderMarkdown escapes the source text up front; htmlFragment keeps the
     // result off innerHTML, exactly as the transcript does
     body.replaceChildren(...htmlFragment(renderMarkdown(rec.text || "")));
+    hydrateMermaid(body);
     view.replaceChildren(head, body);
   }
 }
@@ -7210,6 +7456,8 @@ function applyTheme(theme) {
   // keep the browser chrome (mobile address bar, PWA shell) on the same page color
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute("content", THEME_CHROME[next]);
+  // Mermaid bakes its colors into each SVG, so the diagrams follow the palette
+  redrawMermaid();
 }
 wirePicker("#btn-theme", "#theme-menu");
 document.addEventListener("keydown", (e) => {

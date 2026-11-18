@@ -53,6 +53,7 @@ npm run check         # syntax check: server, frontend, SDK modules, tests
 npm run typecheck     # checkJs over server + SDK + frontend (needs `npm install`)
 npm test              # end-to-end smoke test on its own port
 scripts/vendor-prism.sh  # regenerate public/vendor/prism.min.js (only when adding a grammar)
+scripts/vendor-mermaid.sh  # regenerate public/vendor/mermaid.min.js (only when bumping Mermaid)
 ```
 
 ## Conventions this repo holds itself to

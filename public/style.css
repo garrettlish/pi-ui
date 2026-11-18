@@ -1166,6 +1166,29 @@ details.skill-def[open] > summary { margin-bottom: 6px; }
 }
 .assistant-text pre code,
 .assistant-text .code-block code { padding: 0; background: none; color: inherit; border-radius: 0; }
+
+/* A ```mermaid fence: the source stands in until the SVG arrives, so the block
+   never collapses to nothing while the bundle loads or if it fails. The frame
+   matches a code block so a diagram does not look like a different kind of
+   content from the fence it was written as. */
+.assistant-text .md-mermaid {
+  margin: 8px 0; padding: 10px 14px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--code); overflow-x: auto;
+}
+/* once drawn, the picture carries its own spacing and needs no code fill */
+.assistant-text .md-mermaid.rendered {
+  padding: 12px; background: var(--surface);
+  display: flex; justify-content: center;
+}
+.assistant-text .md-mermaid.rendered svg { max-width: 100%; height: auto; }
+/* Mermaid sets its own explicit font sizes; inherit keeps a wide diagram
+   legible on a narrow sidebar instead of shrinking it past 9px */
+.assistant-text .md-mermaid svg text { font-family: var(--font-ui); }
+.assistant-text .md-mermaid pre.mermaid-src { padding: 0; margin: 0; }
+.assistant-text .md-mermaid-note {
+  margin-top: 6px; font-size: 11.5px; color: var(--text-3);
+}
 .assistant-text h1,
 .assistant-text h2,
 .assistant-text h3 {
