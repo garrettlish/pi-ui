@@ -1518,7 +1518,23 @@ try {
     /built\.node = item\.node;[\s\S]{0,120}built\.dirty = true;/.test(appJs)
   );
   check("a streaming delta keeps a pinned view at the bottom", /function applyStreamDelta[\s\S]{0,600}followViewIfPinned\(\)/.test(appJs));
-  check("scrolling up during a stream stops the follow", /addEventListener\("scroll"[\s\S]{0,300}streamPinned = transcriptAtBottom\(\)/.test(appJs));
+  // The scroll listener decides whether the reader left. A `scroll` event is also
+  // how the engine reports re-laying out items `content-visibility: auto` had
+  // collapsed to an estimate, and how our own scrollTop write echoes back — so
+  // the listener has to recognise the offset the follow asked for, or one layout
+  // pass during a stream disarms the follow for the rest of the run.
+  check(
+    "scrolling up during a stream stops the follow",
+    /addEventListener\("scroll"[\s\S]{0,1200}streamPinned = ours \|\| transcriptAtBottom\(\)/.test(appJs)
+  );
+  check(
+    "the follow's own scroll echo is not mistaken for the reader",
+    /pinnedTop !== null && Math\.abs\(transcriptEl\.scrollTop - pinnedTop\) <= 1/.test(appJs)
+  );
+  check("the follow re-settles the bottom after layout", /function settlePinnedScroll\(\)[\s\S]{0,400}transcriptEl\.scrollTop = max/.test(appJs));
+  // Expanding every thinking block moves the bottom without a single event
+  // arriving; the toggle must re-assert the follow, not look like a reader scroll.
+  check("the thinking toggle keeps a following view at the bottom", /function applyThinkingExpansion\(\)[\s\S]{0,600}if \(following\) scrollBottom\(\)/.test(appJs));
 
   // The sidebar filter is debounced so a typing burst rebuilds the list once.
   check("the session filter is debounced", /session-filter"\)\.addEventListener\("input", queueSidebarRender\)/.test(appJs));

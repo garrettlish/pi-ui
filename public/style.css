@@ -669,15 +669,10 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 
 #sidebar button { font-size: 12px; }
 .sidebar-actions { display: inline-flex; align-items: center; gap: 2px; }
-/* the one prominent control in the sidebar: start a session */
-#sidebar #btn-new-session {
-  width: 30px; height: 30px; min-height: 30px; padding: 0;
-  background: var(--accent); border-color: transparent; color: var(--accent-ink);
-  box-shadow: var(--shadow-sm);
-}
-#sidebar #btn-new-session:hover {
-  background: var(--accent-hover); border-color: transparent; color: var(--accent-ink);
-}
+/* New session reads as one of the inspector controls, not as a filled call to
+   action: the four sidebar buttons are the same kind of thing, so they are drawn
+   the same way. It keeps .icon-btn's own hover (a tinted fill that reveals the
+   border), which is what makes it reachable without a permanent accent block. */
 .sidebar-actions #btn-sidebar-collapse { margin-left: 2px; }
 
 #session-filter {

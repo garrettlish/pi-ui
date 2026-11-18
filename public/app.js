@@ -3091,13 +3091,23 @@ function thinkingIsOpen(key) {
 
 /** Repaint every thinking block already on screen, without touching the rest of
  *  the transcript. Used by the header toggle: the alternative is marking every
- *  assistant item dirty, which rebuilds 2,600 turns to flip an attribute. */
+ *  assistant item dirty, which rebuilds 2,600 turns to flip an attribute.
+ *
+ *  Flipping `open` on 2,600 blocks above the viewport moves the bottom away from
+ *  the reader without a single event arriving, so the follow has to be re-asserted
+ *  here or the toggle itself looks like the reader scrolling: measured, expanding
+ *  all mid-stream left the newest line 901 px below the fold with the jump button
+ *  lit, and every delta after that appended further down. `scrollBottom()` reads
+ *  the heights the flip just produced, so the view lands on the bottom rather
+ *  than 901 px short of it. */
 function applyThinkingExpansion() {
+  const following = streamPinned;
   for (const d of transcriptEl.querySelectorAll("details.item-thinking")) {
     const want = thinkingIsOpen(d.dataset.thinkingKey || null);
     if (d.open !== want) d.open = want;
   }
   syncThinkingToggle();
+  if (following) scrollBottom();
 }
 
 /** The header button's pressed state, and whether it is worth showing at all:
@@ -3422,9 +3432,16 @@ elapsedTimer = setInterval(() => {
   if (running) scheduleRender();
 }, STALL_REPAINT_MS);
 
+/** The offset the follow last asked for, so its own echo can be told apart from
+ *  the reader scrolling. Single-use: the listener below clears it. */
+let pinnedTop = null;
 function scrollBottom() {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   streamPinned = true;
+  // the offset this write produced, which is what lets the scroll listener tell
+  // our own echo from the reader scrolling — see the listener below
+  pinnedTop = transcriptEl.scrollTop;
+  settlePinnedScroll();
 }
 /** within a screen of the bottom, i.e. the view is following the stream */
 function transcriptAtBottom() {
@@ -3433,10 +3450,47 @@ function transcriptAtBottom() {
 function updateJumpButton() {
   $("#btn-jump").classList.toggle("hidden", transcriptAtBottom());
 }
+/** Re-assert the bottom one frame after a follow write.
+ *
+ *  `scrollTop = scrollHeight` is only right for the heights that exist at that
+ *  instant. Items under `content-visibility: auto` carry an estimated height
+ *  until the engine lays them out, so the write is clamped against a transcript
+ *  that then grows in the same frame — measured: 4706 px for the write, 5128 px
+ *  once laid out, leaving the view 422 px above the bottom with the follow still
+ *  armed. Settling it after layout is what makes "show the newest message" true
+ *  instead of approximately true, and it is also what catches a thinking block
+ *  opening: its body is laid out after the write that pinned past it.
+ *
+ *  No-op for a reader who took over, and cheap — one scrollHeight read and
+ *  usually no write. */
+let settleQueued = false;
+function settlePinnedScroll() {
+  if (settleQueued) return;
+  settleQueued = true;
+  requestAnimationFrame(() => {
+    settleQueued = false;
+    if (!streamPinned) return;
+    const max = transcriptEl.scrollHeight - transcriptEl.clientHeight;
+    if (max - transcriptEl.scrollTop < 1) return;
+    transcriptEl.scrollTop = max;
+    pinnedTop = transcriptEl.scrollTop;
+  });
+}
 transcriptEl.addEventListener("scroll", () => {
   // A scroll during a stream is the reader taking over: honour it until they
   // come back to the bottom, which is the same rule renderTranscript applies.
-  streamPinned = transcriptAtBottom();
+  //
+  // Except our own writes come back as `scroll` events too, and so does the
+  // engine re-laying out items `content-visibility: auto` had collapsed to an
+  // estimate: the offset is still exactly where scrollBottom() put it while the
+  // transcript grew underneath. Reading that as the reader leaving used to stop
+  // the follow for the whole rest of the run — measured on a 12-turn transcript,
+  // the follow died 158 events in, on the `message_end` render that swapped
+  // heights for real ones, and every delta after it appended below the fold
+  // while the reader sat 422 px above the newest line.
+  const ours = pinnedTop !== null && Math.abs(transcriptEl.scrollTop - pinnedTop) <= 1;
+  pinnedTop = null;
+  streamPinned = ours || transcriptAtBottom();
   updateJumpButton();
 });
 $("#btn-jump").addEventListener("click", scrollBottom);
@@ -6246,6 +6300,8 @@ let streamPinned = true;
 function followViewIfPinned() {
   if (!streamPinned) return;
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  pinnedTop = transcriptEl.scrollTop;
+  settlePinnedScroll();
 }
 
 function findStreamingAssistant() {
