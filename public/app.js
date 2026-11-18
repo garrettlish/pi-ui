@@ -7552,15 +7552,32 @@ applySidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 280);
 // ---------------------------------------------------------------------------
 // theme
 //
-// Six standalone palettes, not a light/dark or depth ramp: the button opens a
-// listbox of swatches and picking one re-points the tokens in style.css. The
-// theme name is also the document attribute, so no per-theme class juggling is
-// needed and an unknown saved value falls back to the default.
+// A dozen standalone palettes, not a light/dark or depth ramp: the button opens
+// a listbox of swatches, grouped by polarity because that is the choice a
+// reader actually makes first, and picking one re-points the tokens in
+// style.css. The theme name is also the document attribute, so no per-theme
+// class juggling is needed and an unknown saved value falls back to the default.
 // ---------------------------------------------------------------------------
 const ICON_SUN = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`;
 const ICON_MOON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`;
-/** the palette list, lightest mood first: this order is the menu order */
-const THEMES = ["mono", "sky", "grove", "ember", "elegant", "night"];
+/** every palette, light moods first: this order is also the menu order */
+const THEMES = [
+  "mono",
+  "sky",
+  "grove",
+  "ember",
+  "elegant",
+  "blossom",
+  "crimson",
+  "lagoon",
+  "citrus",
+  "honey",
+  "night",
+  "midnight",
+];
+/** the palettes that paint a dark page: the picker groups them and the toolbar
+ *  icon reads its polarity from this list rather than from the palette name */
+const DARK_THEMES = ["night", "midnight"];
 const DEFAULT_THEME = "sky";
 /** The palette a first visit gets. The page cannot ask before `boot()` runs, so
  *  `index.html` has an inline copy of this decision to paint the right color
@@ -7570,12 +7587,18 @@ function firstVisitTheme() {
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "night" : DEFAULT_THEME;
 }
 const THEME_CHROME = {
-  mono: "#eef0f2",
-  sky: "#e8f0fa",
-  grove: "#e9f2e8",
-  ember: "#fbf2e9",
-  elegant: "#f2eef9",
-  night: "#1c1c1e",
+  mono: "#dce4f9",
+  sky: "#c5dffb",
+  grove: "#cbf6e0",
+  ember: "#ffe1c7",
+  elegant: "#ecd5fc",
+  blossom: "#ffcce4",
+  crimson: "#ffd1d3",
+  lagoon: "#cef0f8",
+  citrus: "#edf9cd",
+  honey: "#fef1cd",
+  night: "#0c0e18",
+  midnight: "#150c18",
 };
 /** a saved value from an older build (a retired palette, or "light"/"dark")
  *  still has to resolve, so anything unknown maps onto the closest match */
@@ -7592,23 +7615,32 @@ function svgIcon(markup) {
 function renderThemePicker(current) {
   const menu = $("#theme-menu");
   menu.innerHTML = "";
-  for (const name of THEMES) {
-    const isCurrent = name === current;
-    menu.append(
-      el(
-        "button",
-        {
-          class: `picker-item theme-item${isCurrent ? " selected" : ""}`,
-          role: "option",
-          "aria-selected": String(isCurrent),
-          "data-theme-name": name,
-          onclick: () => applyTheme(name),
-        },
-        el("span", { class: `theme-swatch swatch-${name}`, "aria-hidden": "true" }),
-        el("span", { class: "theme-name", text: name }),
-        el("span", { class: "theme-dot", text: isCurrent ? "✓" : "" })
-      )
-    );
+  // Light first, Dark second: the polarity is the coarse choice, the mood is
+  // the fine one. The groups are labels, not controls — the options stay one
+  // flat radio group underneath, which is what the arrow keys move through.
+  for (const [label, names] of [
+    ["Light", THEMES.filter((n) => !DARK_THEMES.includes(n))],
+    ["Dark", DARK_THEMES],
+  ]) {
+    menu.append(el("div", { class: "picker-group", text: label }));
+    for (const name of names) {
+      const isCurrent = name === current;
+      menu.append(
+        el(
+          "button",
+          {
+            class: `picker-item theme-item${isCurrent ? " selected" : ""}`,
+            role: "option",
+            "aria-selected": String(isCurrent),
+            "data-theme-name": name,
+            onclick: () => applyTheme(name),
+          },
+          el("span", { class: `theme-swatch swatch-${name}`, "aria-hidden": "true" }),
+          el("span", { class: "theme-name", text: name }),
+          el("span", { class: "theme-dot", text: isCurrent ? "✓" : "" })
+        )
+      );
+    }
   }
 }
 /** index of a palette name in THEMES, or -1 when it is not one */
@@ -7620,7 +7652,7 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = next;
   localStorage.setItem("piweb-theme", next);
   // the icon echoes the polarity, not the palette: sun while dark, moon while light
-  $("#btn-theme").replaceChildren(svgIcon(next === "night" ? ICON_SUN : ICON_MOON));
+  $("#btn-theme").replaceChildren(svgIcon(DARK_THEMES.includes(next) ? ICON_SUN : ICON_MOON));
   renderThemePicker(next);
   // keep the browser chrome (mobile address bar, PWA shell) on the same page color
   const meta = document.querySelector('meta[name="theme-color"]');

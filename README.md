@@ -102,7 +102,9 @@ SDK instead of bridging RPC is what makes it fast:
 - Queued steering / follow-up messages appear in a dock above the composer and can be undone
   individually or cleared. `Esc` or **Stop** aborts the current run.
 - Model and thinking-level menus honor `enabledModels` from `~/.pi/agent/settings.json`.
-- Six palettes (mono, sky, grove, ember, elegant, night), a resizable and collapsible sidebar, and
+- Twelve saturated palettes in a Light / Dark picker (mono, sky, grove, ember, elegant, blossom,
+  crimson, lagoon, citrus, honey, night, midnight), each a loud page under white
+  reading cards, a resizable and collapsible sidebar, and
   tool-call state that reads twice over (rail plus worded chip) so it never depends on color alone.
 - A settings inspector with four tabs: **Models**, **Skills**, **MCPs** and **Processes** — the last
   one listing long-running processes a session's bash calls left behind, each stoppable by pid.

@@ -6,69 +6,83 @@
    the primary action and the current selection, and translucency only on the
    functional layer (toolbar, sidebar, composer) where it sits above content.
 
-   Six palettes share one token set. Only the color tokens are redefined per
-   palette — type, spacing, radii and every component rule below are shared, so
-   each palette is the same design in a different mood:
+   A dozen palettes share one token set. Only the color tokens are redefined
+   per palette — type, spacing, radii and every component rule below are shared,
+   so each palette is the same design in a different mood. All of them are loud
+   on purpose: a saturated page, a fill-strength accent and a tint you can spot
+   across a room, on white cards that keep long prose readable. The last two are
+   the dark moods, and the picker groups them that way:
 
-     mono    neutral ink on a cool grey page
-     sky     the default light mood: system blue on a pale blue page
-     grove   a muted green
-     ember   a warm amber
-     elegant a soft violet
-     night   dark mode
+     mono     electric indigo on a periwinkle page
+     sky      the default: cobalt on a candy-azure page
+     grove    electric grass on a mint page
+     ember    cayenne on a tangerine page
+     elegant  electric magenta on an orchid page
+     blossom  hot magenta on a rose page
+     crimson  signal red on a blush page
+     lagoon   deep teal on a cyan page
+     citrus   olive-lime on a chartreuse page
+     honey    amber on a gold page
+     night    neon blue on deep indigo
+     midnight hot-pink neon on deep plum
 
-   Every text pair in every palette clears 4.5:1; secondary text was checked
-   against the page, the card surface and the elevated fill, and white labels
-   on --accent fills clear 4.5:1 too. Accent is never used to carry meaning on
-   its own: status always has text beside it.
+   Contrast is a build constraint, not a review note: every text pair clears
+   4.5:1, secondary and tertiary text were fitted against the page, the card
+   surface, the elevated fill, the table band *and* the selected-row tint, and
+   labels on --accent fills clear 4.5:1 too — --accent is also dark enough to
+   be printed as text on those fills (`.turn-action.primary`), so it is fitted
+   against the tint as well. Accent is never used to carry meaning on its own:
+   status always has text beside it.
 
    :root holds the night palette so it doubles as the no-JS fallback.
 --------------------------------------------------------------------------- */
 :root {
   /* surfaces: page (grouped background) < surface (cards) < elevated (fills) */
-  --page: #1c1c1e;
-  --surface: #232326;
-  --elevated: #2c2c2e;
-  --code: #171719;
-  /* a table header band: one step darker than a card body, because the band has
-     to read as a band. --elevated is only 1.1:1 against a white or dark card,
-     which is why the header tint was invisible. */
-  --table-head: #37373f;
+  --page: #0c0e18;
+  --surface: #151723;
+  --elevated: #1d2032;
+  --code: #080a11;
+  /* a table header band: one step away from a card body, because the band has
+     to read as a band. --elevated is only 1.1:1 against a card, which is why
+     the header tint was invisible. */
+  --table-head: #252a46;
   /* the floating functional layer: toolbar, sidebar, composer */
-  --glass: rgba(30, 30, 33, 0.72);
-  --border: #34343a;
-  --border-strong: #46464e;
+  --glass: rgba(21, 23, 35, 0.76);
+  --border: #2f324c;
+  --border-strong: #4a5078;
 
   /* text: primary, secondary (labels), tertiary (metadata) */
-  --text: #f5f5f7;
-  --text-2: #b8b8c0;
-  --text-3: #a1a1a8;
+  --text: #f8f9fb;
+  --text-2: #afb3ca;
+  --text-3: #9397b4;
 
-  /* one accent, used for the primary action, selection and focus */
-  --accent: #1a6fd4;
-  --accent-hover: #2a7de0;
-  --accent-ink: #ffffff;            /* label on an accent fill */
-  --accent-text: #5aa2f5;           /* accent as text on a surface */
-  --accent-tint: #22334a;           /* selected row, soft badge, chip */
-  --accent-tint-border: #3b5878;
-  --focus: #5aa2f5;
+  /* one accent, used for the primary action, selection and focus. A dark
+     palette lights its accent up and prints dark ink on it, so the fill stays
+     neon against the page instead of muddying into it. */
+  --accent: #29a6ff;
+  --accent-hover: #5cbbff;
+  --accent-ink: #091015;            /* label on an accent fill */
+  --accent-text: #70c4ff;           /* accent as text on a surface */
+  --accent-tint: #142f43;           /* selected row, soft badge, chip */
+  --accent-tint-border: #1a6193;
+  --focus: #66bfff;
 
   /* status: always paired with a word, never color alone */
-  --success: #4ecf9b;
-  --success-tint: #14332a;
-  --warning: #f2b544;
-  --warning-tint: #33280f;
-  --danger: #ff7b6b;
-  --danger-tint: #331d1b;
+  --success: #5aedbc;
+  --success-tint: #183f32;
+  --warning: #f7c245;
+  --warning-tint: #413416;
+  --danger: #f76964;
+  --danger-tint: #461c1b;
 
   /* depth: one soft shadow scale, tinted to the page rather than pure black */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.36);
-  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.52);
-  --overlay: rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
+  --overlay: rgba(2, 4, 10, 0.7);
 
   /* the ink of the logo mark drawn on --text */
-  --scrollbar: #54545c;
+  --scrollbar: #565b81;
 
   /* type: the platform UI face for chrome, mono for data and code */
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
@@ -98,199 +112,429 @@
    The six palettes.
 --------------------------------------------------------------------------- */
 
-/* mono: no chromatic accent at all. Ink carries the hierarchy; only status
-   keeps a hue, because status without a hue is not a status. */
+/* mono: ink plus one electric indigo. Still the most restrained of the six in
+   hue count — every surface is a tint of the same indigo family — but the
+   accent is a fill-strength electric blue rather than black. */
 :root[data-theme="mono"] {
-  --page: #eef0f2;
+  --page: #dce4f9;
   --surface: #ffffff;
-  --elevated: #f4f5f7;
-  --code: #f7f8f9;
-  --table-head: #dadde2;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #dcdde0;
-  --border-strong: #c7c9cd;
-
-  --text: #1d1d1f;
-  --text-2: #4f5055;
-  --text-3: #636469;
-
-  --accent: #1d1d1f;
-  --accent-hover: #000000;
-  --accent-ink: #ffffff;
-  --accent-text: #1d1d1f;
-  --accent-tint: #ebedef;
-  --accent-tint-border: #d4d6da;
-  --focus: #1d1d1f;
-
-  --success: #10724a;
-  --success-tint: #e6f5ee;
-  --warning: #7c4a08;
-  --warning-tint: #fdf1df;
-  --danger: #a81f18;
-  --danger-tint: #fdecea;
-
-  --shadow-sm: 0 1px 2px rgba(20, 22, 26, 0.08);
-  --shadow-md: 0 4px 14px rgba(20, 22, 26, 0.1);
-  --shadow-lg: 0 18px 48px rgba(20, 22, 26, 0.18);
-  --overlay: rgba(30, 32, 38, 0.32);
-  --scrollbar: #c3c5c9;
-  color-scheme: light;
-}
-
-/* sky: system blue on a pale blue page */
-:root[data-theme="sky"] {
-  --page: #e8f0fa;
-  --surface: #ffffff;
-  --elevated: #f0f5fb;
-  --code: #f6faff;
-  --table-head: #cfe0f6;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #d8e3f0;
-  --border-strong: #bccbdd;
-
-  --text: #12212f;
-  --text-2: #4a5a70;
-  --text-3: #5d6d84;
-
-  --accent: #0a63c9;
-  --accent-hover: #084e9f;
-  --accent-ink: #ffffff;
-  --accent-text: #0a63c9;
-  --accent-tint: #e7f1fd;
-  --accent-tint-border: #c4daf6;
-  --focus: #0a63c9;
-
-  --success: #10724a;
-  --success-tint: #e6f5ee;
-  --warning: #7c4a08;
-  --warning-tint: #fdf1df;
-  --danger: #a81f18;
-  --danger-tint: #fdecea;
-
-  --shadow-sm: 0 1px 2px rgba(18, 46, 80, 0.08);
-  --shadow-md: 0 4px 14px rgba(18, 46, 80, 0.1);
-  --shadow-lg: 0 18px 48px rgba(18, 46, 80, 0.18);
-  --overlay: rgba(16, 36, 60, 0.3);
-  --scrollbar: #b9c7d8;
-  color-scheme: light;
-}
-
-/* grove: a muted green */
-:root[data-theme="grove"] {
-  --page: #e9f2e8;
-  --surface: #ffffff;
-  --elevated: #f1f7f0;
-  --code: #f7fbf6;
-  --table-head: #d5e5d1;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #d7e5d5;
-  --border-strong: #bdd2ba;
-
-  --text: #14231a;
-  --text-2: #45604e;
-  --text-3: #586c5e;
-
-  --accent: #1c7239;
-  --accent-hover: #145c2d;
-  --accent-ink: #ffffff;
-  --accent-text: #1c7239;
-  --accent-tint: #e7f4e6;
-  --accent-tint-border: #c3ddc1;
-  --focus: #1c7239;
-
-  --success: #10724a;
-  --success-tint: #e6f5ee;
-  --warning: #7c4a08;
-  --warning-tint: #fdf1df;
-  --danger: #a81f18;
-  --danger-tint: #fdecea;
-
-  --shadow-sm: 0 1px 2px rgba(20, 45, 30, 0.08);
-  --shadow-md: 0 4px 14px rgba(20, 45, 30, 0.1);
-  --shadow-lg: 0 18px 48px rgba(20, 45, 30, 0.18);
-  --overlay: rgba(18, 40, 26, 0.3);
-  --scrollbar: #b6c9b4;
-  color-scheme: light;
-}
-
-/* ember: a warm amber accent on a cream page */
-:root[data-theme="ember"] {
-  --page: #fbf2e9;
-  --surface: #ffffff;
-  --elevated: #fcf3ea;
-  --code: #fffaf5;
-  --table-head: #f2dcc0;
+  --elevated: #e8edfc;
+  --code: #f5f7fd;
+  --table-head: #b6c9fb;
   --glass: rgba(255, 255, 255, 0.8);
-  --border: #eddfd0;
-  --border-strong: #dfc6ae;
+  --border: #c0cced;
+  --border-strong: #4e73da;
 
-  --text: #2a1a10;
-  --text-2: #5b4636;
-  --text-3: #715c49;
+  --text: #0b101e;
+  --text-2: #333c57;
+  --text-3: #3e4a6a;
 
-  --accent: #a8440e;
-  --accent-hover: #8a360a;
+  --accent: #1000f0;
+  --accent-hover: #0b00a8;
   --accent-ink: #ffffff;
-  --accent-text: #a8440e;
-  --accent-tint: #fbeade;
-  --accent-tint-border: #f2cea9;
-  --focus: #a8440e;
+  --accent-text: #1000f0;
+  --accent-tint: #bcb8ff;
+  --accent-tint-border: #8077f8;
+  --focus: #1000f0;
 
-  --success: #10724a;
-  --success-tint: #e6f5ee;
-  --warning: #7c4a08;
-  --warning-tint: #fdf1df;
-  --danger: #a81f18;
-  --danger-tint: #fdecea;
+  --success: #06734b;
+  --success-tint: #dbfaef;
+  --warning: #985304;
+  --warning-tint: #fde9d3;
+  --danger: #c00c18;
+  --danger-tint: #fcdee0;
 
-  --shadow-sm: 0 1px 2px rgba(70, 40, 15, 0.08);
-  --shadow-md: 0 4px 14px rgba(70, 40, 15, 0.1);
-  --shadow-lg: 0 18px 48px rgba(70, 40, 15, 0.18);
-  --overlay: rgba(58, 34, 14, 0.3);
-  --scrollbar: #d5c0ab;
+  --shadow-sm: 0 1px 2px hsl(224 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(224 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(224 60% 25% / 0.24);
+  --overlay: hsl(224 60% 15% / 0.34);
+  --scrollbar: #9da9c8;
   color-scheme: light;
 }
 
-/* elegant: a soft violet */
-:root[data-theme="elegant"] {
-  --page: #f2eef9;
+/* sky: saturated cobalt on a candy-azure page */
+:root[data-theme="sky"] {
+  --page: #c5dffb;
   --surface: #ffffff;
-  --elevated: #f6f2fc;
-  --code: #faf8fe;
-  --table-head: #e2d6f4;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #e4dcf0;
-  --border-strong: #cfc2e3;
+  --elevated: #e6f1fe;
+  --code: #f4f8fd;
+  --table-head: #9ecbff;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #c0d5ed;
+  --border-strong: #4e8fda;
 
-  --text: #1e1a28;
-  --text-2: #544a6a;
-  --text-3: #665c7d;
+  --text: #0b141e;
+  --text-2: #334457;
+  --text-3: #3b4e64;
 
-  --accent: #6a3cbe;
-  --accent-hover: #54309a;
+  --accent: #0039be;
+  --accent-hover: #002f9e;
   --accent-ink: #ffffff;
-  --accent-text: #6a3cbe;
-  --accent-tint: #f1eafa;
-  --accent-tint-border: #dac9f1;
-  --focus: #6a3cbe;
+  --accent-text: #0039be;
+  --accent-tint: #a3bfff;
+  --accent-tint-border: #6490f7;
+  --focus: #0039be;
 
-  --success: #10724a;
-  --success-tint: #e6f5ee;
-  --warning: #7c4a08;
-  --warning-tint: #fdf1df;
-  --danger: #a81f18;
-  --danger-tint: #fdecea;
+  --success: #066e43;
+  --success-tint: #dbfaed;
+  --warning: #944c04;
+  --warning-tint: #fde8d3;
+  --danger: #c00c1e;
+  --danger-tint: #fcdee1;
 
-  --shadow-sm: 0 1px 2px rgba(40, 30, 60, 0.08);
-  --shadow-md: 0 4px 14px rgba(40, 30, 60, 0.1);
-  --shadow-lg: 0 18px 48px rgba(40, 30, 60, 0.18);
-  --overlay: rgba(34, 26, 52, 0.3);
-  --scrollbar: #c8bad9;
+  --shadow-sm: 0 1px 2px hsl(212 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(212 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(212 60% 25% / 0.24);
+  --overlay: hsl(212 60% 15% / 0.34);
+  --scrollbar: #9db1c8;
   color-scheme: light;
 }
 
-/* night: dark mode. The :root block above already is this palette. */
+/* grove: electric grass on a mint page */
+:root[data-theme="grove"] {
+  --page: #cbf6e0;
+  --surface: #ffffff;
+  --elevated: #e9fbf2;
+  --code: #f5fcf9;
+  --table-head: #a8f5cf;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #c0edd6;
+  --border-strong: #4eda94;
+
+  --text: #0b1e14;
+  --text-2: #335745;
+  --text-3: #3e6a54;
+
+  --accent: #007537;
+  --accent-hover: #005226;
+  --accent-ink: #ffffff;
+  --accent-text: #007537;
+  --accent-tint: #a3ffce;
+  --accent-tint-border: #64f7a9;
+  --focus: #007537;
+
+  --success: #067768;
+  --success-tint: #dbfaf6;
+  --warning: #995b04;
+  --warning-tint: #fdebd3;
+  --danger: #c00c30;
+  --danger-tint: #fcdee4;
+
+  --shadow-sm: 0 1px 2px hsl(150 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(150 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(150 60% 25% / 0.24);
+  --overlay: hsl(150 60% 15% / 0.34);
+  --scrollbar: #9dc8b3;
+  color-scheme: light;
+}
+
+/* ember: cayenne on a tangerine page */
+:root[data-theme="ember"] {
+  --page: #ffe1c7;
+  --surface: #ffffff;
+  --elevated: #fef1e6;
+  --code: #fdf8f4;
+  --table-head: #ffcea3;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #edd5c0;
+  --border-strong: #da8f4e;
+
+  --text: #1e140b;
+  --text-2: #574433;
+  --text-3: #68513d;
+
+  --accent: #9c2400;
+  --accent-hover: #851f00;
+  --accent-ink: #ffffff;
+  --accent-text: #9c2400;
+  --accent-tint: #ffbda8;
+  --accent-tint-border: #f78a69;
+  --focus: #9c2400;
+
+  --success: #067542;
+  --success-tint: #dbfaec;
+  --warning: #8e5b04;
+  --warning-tint: #fdeed3;
+  --danger: #c00c24;
+  --danger-tint: #fcdee2;
+
+  --shadow-sm: 0 1px 2px hsl(28 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(28 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(28 60% 25% / 0.24);
+  --overlay: hsl(28 60% 15% / 0.34);
+  --scrollbar: #c8b19d;
+  color-scheme: light;
+}
+
+/* elegant: electric magenta on an orchid page */
+:root[data-theme="elegant"] {
+  --page: #ecd5fc;
+  --surface: #ffffff;
+  --elevated: #f4e7fd;
+  --code: #f9f4fd;
+  --table-head: #deaffd;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #dbc0ed;
+  --border-strong: #a24eda;
+
+  --text: #160b1e;
+  --text-2: #483357;
+  --text-3: #593e6a;
+
+  --accent: #8f0099;
+  --accent-hover: #81008a;
+  --accent-ink: #ffffff;
+  --accent-text: #8f0099;
+  --accent-tint: #fab3ff;
+  --accent-tint-border: #ef72f8;
+  --focus: #8f0099;
+
+  --success: #066e44;
+  --success-tint: #dbfaee;
+  --warning: #905104;
+  --warning-tint: #fdead3;
+  --danger: #bf0c48;
+  --danger-tint: #fcdee8;
+
+  --shadow-sm: 0 1px 2px hsl(276 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(276 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(276 60% 25% / 0.24);
+  --overlay: hsl(276 60% 15% / 0.34);
+  --scrollbar: #b79dc8;
+  color-scheme: light;
+}
+
+/* night: neon on deep indigo. The :root block above already is this palette. */
 :root[data-theme="night"] {
+  color-scheme: dark;
+}
+
+/* blossom: hot magenta on a rose page */
+:root[data-theme="blossom"] {
+  --page: #ffcce4;
+  --surface: #ffffff;
+  --elevated: #fee6f1;
+  --code: #fdf4f8;
+  --table-head: #ffa8d1;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #edc0d5;
+  --border-strong: #da4e8f;
+
+  --text: #1e0b14;
+  --text-2: #573344;
+  --text-3: #6a3e53;
+
+  --accent: #9a004d;
+  --accent-hover: #8a0045;
+  --accent-ink: #ffffff;
+  --accent-text: #9a004d;
+  --accent-tint: #ffadd6;
+  --accent-tint-border: #f76eb3;
+  --focus: #9a004d;
+
+  --success: #066c46;
+  --success-tint: #dbfaef;
+  --warning: #8c4f04;
+  --warning-tint: #fdead3;
+  --danger: #b7230c;
+  --danger-tint: #fce2de;
+
+  --shadow-sm: 0 1px 2px hsl(332 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(332 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(332 60% 25% / 0.24);
+  --overlay: hsl(332 60% 15% / 0.34);
+  --scrollbar: #c89db1;
+  color-scheme: light;
+}
+
+/* crimson: signal red on a blush page. Danger shifts to magenta so a failed
+   state cannot disappear against the red accent it sits beside. */
+:root[data-theme="crimson"] {
+  --page: #ffd1d3;
+  --surface: #ffffff;
+  --elevated: #fee6e7;
+  --code: #fdf4f4;
+  --table-head: #ffadb1;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #edc0c2;
+  --border-strong: #da4e55;
+
+  --text: #1e0b0c;
+  --text-2: #573335;
+  --text-3: #6a3e40;
+
+  --accent: #a00414;
+  --accent-hover: #900412;
+  --accent-ink: #ffffff;
+  --accent-text: #a00414;
+  --accent-tint: #fdb4bc;
+  --accent-tint-border: #f47682;
+  --focus: #a00414;
+
+  --success: #066d47;
+  --success-tint: #dbfaef;
+  --warning: #895304;
+  --warning-tint: #fdecd3;
+  --danger: #930cc0;
+  --danger-tint: #f5defc;
+
+  --shadow-sm: 0 1px 2px hsl(357 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(357 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(357 60% 25% / 0.24);
+  --overlay: hsl(357 60% 15% / 0.34);
+  --scrollbar: #c89d9f;
+  color-scheme: light;
+}
+
+/* lagoon: deep teal on a cyan page */
+:root[data-theme="lagoon"] {
+  --page: #cef0f8;
+  --surface: #ffffff;
+  --elevated: #e8f8fc;
+  --code: #f5fbfd;
+  --table-head: #a8eafa;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #c0e4ed;
+  --border-strong: #4ebeda;
+
+  --text: #0b1a1e;
+  --text-2: #335057;
+  --text-3: #3e616a;
+
+  --accent: #006c7d;
+  --accent-hover: #005461;
+  --accent-ink: #ffffff;
+  --accent-text: #006c7d;
+  --accent-tint: #a8f3ff;
+  --accent-tint-border: #69e4f7;
+  --focus: #006c7d;
+
+  --success: #06783f;
+  --success-tint: #dbfaeb;
+  --warning: #995804;
+  --warning-tint: #fdebd3;
+  --danger: #c00c24;
+  --danger-tint: #fcdee2;
+
+  --shadow-sm: 0 1px 2px hsl(192 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(192 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(192 60% 25% / 0.24);
+  --overlay: hsl(192 60% 15% / 0.34);
+  --scrollbar: #9dbfc8;
+  color-scheme: light;
+}
+
+/* citrus: olive-lime on a chartreuse page */
+:root[data-theme="citrus"] {
+  --page: #edf9cd;
+  --surface: #ffffff;
+  --elevated: #f7fbe9;
+  --code: #fafcf5;
+  --table-head: #e3f7ab;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #e1edc0;
+  --border-strong: #b4da4e;
+
+  --text: #191e0b;
+  --text-2: #4d5733;
+  --text-3: #5e6a3e;
+
+  --accent: #3f7500;
+  --accent-hover: #264700;
+  --accent-ink: #ffffff;
+  --accent-text: #3f7500;
+  --accent-tint: #d7ffa8;
+  --accent-tint-border: #b5f769;
+  --focus: #3f7500;
+
+  --success: #077d65;
+  --success-tint: #dbfaf4;
+  --warning: #946404;
+  --warning-tint: #fdefd3;
+  --danger: #c00c0c;
+  --danger-tint: #fcdede;
+
+  --shadow-sm: 0 1px 2px hsl(76 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(76 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(76 60% 25% / 0.24);
+  --overlay: hsl(76 60% 15% / 0.34);
+  --scrollbar: #bcc89d;
+  color-scheme: light;
+}
+
+/* honey: amber on a gold page */
+:root[data-theme="honey"] {
+  --page: #fef1cd;
+  --surface: #ffffff;
+  --elevated: #fef8e7;
+  --code: #fdfbf4;
+  --table-head: #ffe8a8;
+  --glass: rgba(255, 255, 255, 0.8);
+  --border: #ede1c0;
+  --border-strong: #dab44e;
+
+  --text: #1e190b;
+  --text-2: #574d33;
+  --text-3: #6a5e3e;
+
+  --accent: #885600;
+  --accent-hover: #5c3a00;
+  --accent-ink: #ffffff;
+  --accent-text: #885600;
+  --accent-tint: #ffe1ad;
+  --accent-tint-border: #f7c56e;
+  --focus: #885600;
+
+  --success: #077d46;
+  --success-tint: #dbfaec;
+  --warning: #a93b04;
+  --warning-tint: #fde1d3;
+  --danger: #c00c18;
+  --danger-tint: #fcdee0;
+
+  --shadow-sm: 0 1px 2px hsl(44 60% 25% / 0.1);
+  --shadow-md: 0 4px 14px hsl(44 60% 25% / 0.14);
+  --shadow-lg: 0 18px 48px hsl(44 60% 25% / 0.24);
+  --overlay: hsl(44 60% 15% / 0.34);
+  --scrollbar: #c8bc9d;
+  color-scheme: light;
+}
+
+/* midnight: dark mode's second mood, hot-pink neon on deep plum */
+:root[data-theme="midnight"] {
+  --page: #150c18;
+  --surface: #201523;
+  --elevated: #2e1d32;
+  --code: #0f0811;
+  --table-head: #3f2546;
+  --glass: rgba(32, 21, 35, 0.76);
+  --border: #462f4c;
+  --border-strong: #6f4a78;
+
+  --text: #fbf8fb;
+  --text-2: #c5afca;
+  --text-3: #ad93b4;
+
+  --accent: #ff50a8;
+  --accent-hover: #ff5cad;
+  --accent-ink: #15090f;
+  --accent-text: #ff70b8;
+  --accent-tint: #43142b;
+  --accent-tint-border: #931a57;
+  --focus: #ff66b3;
+
+  --success: #5aedc8;
+  --success-tint: #183f35;
+  --warning: #f7bc45;
+  --warning-tint: #413316;
+  --danger: #f77364;
+  --danger-tint: #461f1b;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
+  --overlay: rgba(6, 2, 8, 0.72);
+  --scrollbar: #785681;
   color-scheme: dark;
 }
 
@@ -733,9 +977,11 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 .picker-item .picker-check { flex: none; width: 12px; color: var(--accent-text); }
 .picker-item .picker-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* theme menu: each row previews its own page, panel and accent, so the six
-   moods read apart at a glance instead of as one list of words */
-#theme-menu { min-width: 200px; }
+/* theme menu: each row previews its own page, panel and accent, so the moods
+   read apart at a glance instead of as one list of words. Twelve rows do not
+   fit a phone screen at once, so the menu scrolls to a bounded height instead
+   of running off the bottom of a short window. */
+#theme-menu { min-width: 220px; max-height: min(60vh, 480px); }
 .theme-item { gap: 10px; }
 .theme-swatch {
   flex: none; width: 30px; height: 18px; border-radius: var(--radius-xs);
@@ -748,12 +994,18 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   background-position: bottom left, top left, top right;
   background-repeat: no-repeat;
 }
-.swatch-mono { --sw-page: #eef0f2; --sw-panel: #ffffff; --sw-accent: #1d1d1f; }
-.swatch-sky { --sw-page: #e8f0fa; --sw-panel: #ffffff; --sw-accent: #0a63c9; }
-.swatch-grove { --sw-page: #e9f2e8; --sw-panel: #ffffff; --sw-accent: #1c7239; }
-.swatch-ember { --sw-page: #fbf2e9; --sw-panel: #ffffff; --sw-accent: #a8440e; }
-.swatch-elegant { --sw-page: #f2eef9; --sw-panel: #ffffff; --sw-accent: #6a3cbe; }
-.swatch-night { --sw-page: #1c1c1e; --sw-panel: #232326; --sw-accent: #5aa2f5; }
+.swatch-mono { --sw-page: #dce4f9; --sw-panel: #ffffff; --sw-accent: #1000f0; }
+.swatch-sky { --sw-page: #c5dffb; --sw-panel: #ffffff; --sw-accent: #0039be; }
+.swatch-grove { --sw-page: #cbf6e0; --sw-panel: #ffffff; --sw-accent: #007537; }
+.swatch-ember { --sw-page: #ffe1c7; --sw-panel: #ffffff; --sw-accent: #9c2400; }
+.swatch-elegant { --sw-page: #ecd5fc; --sw-panel: #ffffff; --sw-accent: #8f0099; }
+.swatch-night { --sw-page: #0c0e18; --sw-panel: #151723; --sw-accent: #29a6ff; }
+.swatch-blossom { --sw-page: #ffcce4; --sw-panel: #ffffff; --sw-accent: #9a004d; }
+.swatch-crimson { --sw-page: #ffd1d3; --sw-panel: #ffffff; --sw-accent: #a00414; }
+.swatch-lagoon { --sw-page: #cef0f8; --sw-panel: #ffffff; --sw-accent: #006c7d; }
+.swatch-citrus { --sw-page: #edf9cd; --sw-panel: #ffffff; --sw-accent: #3f7500; }
+.swatch-honey { --sw-page: #fef1cd; --sw-panel: #ffffff; --sw-accent: #885600; }
+.swatch-midnight { --sw-page: #150c18; --sw-panel: #201523; --sw-accent: #ff50a8; }
 .theme-item .theme-name { flex: 1 1 auto; min-width: 0; text-transform: capitalize; }
 .theme-item .theme-dot { flex: none; width: 12px; text-align: center; color: var(--accent-text); }
 

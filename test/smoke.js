@@ -121,6 +121,98 @@ function minimalDocx(escapedText, { corrupt = false } = {}) {
   return Buffer.concat([...locals, directory, end]);
 }
 
+/** The palette token blocks of style.css: `:root` (which doubles as the night
+ *  palette and the no-JS fallback) plus one `:root[data-theme="..."]` per
+ *  named mood. Parsing the file is deliberate — the test must read the colors
+ *  that actually ship, not a copy that can drift.
+ *  @returns {Array<[string, Record<string, string>]>} */
+function paletteBlocks(css) {
+  const blocks = [];
+  const re = /:root(?:\[data-theme="([a-z]+)"\])?\s*\{([\s\S]*?)\n\}/g;
+  let m;
+  while ((m = re.exec(css))) {
+    const tokens = {};
+    for (const line of m[2].split("\n")) {
+      const t = line.match(/^\s*(--[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\s*;/);
+      if (t) tokens[t[1]] = t[2];
+    }
+    // only a palette block defines --page: the bare :root above is the night
+    // palette, and the named night block below only restates color-scheme
+    if (!tokens["--page"]) continue;
+    blocks.push([m[1] || "night", tokens]);
+  }
+  return blocks;
+}
+
+const relativeLuminance = (hexColor) => {
+  const s = hexColor.replace("#", "");
+  const full = s.length === 3 ? [...s].map((c) => c + c).join("") : s;
+  const [r, g, b] = [0, 2, 4].map((i) => {
+    const v = parseInt(full.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+
+const contrastRatio = (a, b) => {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+
+/** Every foreground/background pair the component rules actually compose —
+ *  text on the page, on a card, on the elevated fill, on the table band and on
+ *  the selected-row tint; a white label on an accent fill; accent as text on
+ *  each of those fills. Each entry is [fg token, bg token]. */
+const PALETTE_PAIRS = [
+  ["--text", "--page"],
+  ["--text", "--surface"],
+  ["--text", "--elevated"],
+  ["--text", "--code"],
+  ["--text", "--table-head"],
+  ["--text", "--accent-tint"],
+  ["--text-2", "--page"],
+  ["--text-2", "--surface"],
+  ["--text-2", "--elevated"],
+  ["--text-2", "--table-head"],
+  ["--text-2", "--accent-tint"],
+  ["--text-3", "--page"],
+  ["--text-3", "--surface"],
+  ["--text-3", "--elevated"],
+  ["--text-3", "--table-head"],
+  ["--text-3", "--accent-tint"],
+  ["--accent-ink", "--accent"],
+  ["--accent-ink", "--accent-hover"],
+  ["--accent-text", "--surface"],
+  ["--accent-text", "--page"],
+  ["--accent-text", "--elevated"],
+  ["--accent-text", "--accent-tint"],
+  // --accent is also printed on the tint (`.turn-action.primary`)
+  ["--accent", "--surface"],
+  ["--accent", "--page"],
+  ["--accent", "--elevated"],
+  ["--accent", "--accent-tint"],
+  ["--success", "--surface"],
+  ["--success", "--page"],
+  ["--success", "--success-tint"],
+  ["--warning", "--surface"],
+  ["--warning", "--page"],
+  ["--warning", "--warning-tint"],
+  ["--danger", "--surface"],
+  ["--danger", "--page"],
+  ["--danger", "--danger-tint"],
+];
+
+/** pairs that miss 4.5:1, as "fg on bg = 3.1" strings */
+function paletteFailures(tokens) {
+  const weak = [];
+  for (const [fg, bg] of PALETTE_PAIRS) {
+    if (!tokens[fg] || !tokens[bg]) continue;
+    const r = contrastRatio(tokens[fg], tokens[bg]);
+    if (r < 4.5) weak.push(`${fg.slice(2)} on ${bg.slice(2)} = ${r.toFixed(2)}`);
+  }
+  return weak;
+}
+
 let failures = 0;
 function check(name, ok, detail = "") {
   if (ok) console.log(`  ok    ${name}`);
@@ -962,6 +1054,17 @@ try {
   );
   const css = await (await fetch(`${BASE}/style.css`)).text();
   check("style.css gives rendered links a palette color", css.includes(".assistant-text a {"));
+
+  // The palettes promise 4.5:1, and a promise a hand-edited hex cannot keep is
+  // worth nothing: the six moods were tuned against these exact pairs, so the
+  // ratio is asserted here instead of trusted to the comment in style.css. A
+  // palette that drops below the floor (white label on a washed-out accent, a
+  // selected row whose metadata goes unreadable) fails the build rather than
+  // shipping as "a bit muddy".
+  for (const [name, tokens] of paletteBlocks(css)) {
+    const weak = paletteFailures(tokens);
+    check(`the ${name} palette clears 4.5:1 on every text pair`, weak.length === 0, weak.join("; "));
+  }
 
   // A nested list is structure, not decoration: "rule, then its two sub-rules"
   // flattened into three siblings reads as three peers. Every saved session
