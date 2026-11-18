@@ -29,24 +29,48 @@
  *
  * ## What is evidence
  *
- * Two things survive, and both only ever *shorten* a wait they can prove wrong:
+ * Four things survive. None of them can start or extend a run's life; each only
+ * *shortens* a wait it can prove is wasted, or *softens* wording it can prove is
+ * unfair:
  *
- *  - `alive`  a Cursor socket's `bytesRead` advanced within `RECENT_BYTES_MS`.
- *             Bytes arrived, so the transport is carrying frames; the silence
- *             belongs to the provider, not the network.
+ *  - `alive`  a Cursor socket's `bytesRead` advanced, or a provider request's
+ *             response body delivered a chunk, within `RECENT_BYTES_MS`. Bytes
+ *             arrived, so the transport is carrying frames; the silence belongs
+ *             to the provider, not the network. The request-level half is
+ *             provider-agnostic and is what lets a non-Cursor run be described
+ *             honestly instead of only being waited out.
+ *  - `broken`  a *long-lived* request to a non-local origin failed with a
+ *             transport code after this run's last event, and nothing has been
+ *             received on that origin since. Two facts make this sound rather
+ *             than a guess: the request was open longer than any short call
+ *             (`LONG_REQUEST_MS`), so it is the streaming one and not a model
+ *             listing or a health check; and pi reacts to its own provider
+ *             failures by emitting an event (`auto_retry_start`, `agent_end`,
+ *             `agent_settled`), so an error with no event *after* it means the
+ *             run is wedged — the exact state that made a stall unkillable.
+ *             Measured 2026-11-18: a mid-body `socket.destroy()` yields
+ *             `UND_ERR_SOCKET` at the drop, and a peer that stops sending
+ *             without any FIN yields `UND_ERR_BODY_TIMEOUT` when the
+ *             dispatcher's own `bodyTimeout` expires (300 s by default).
  *  - `unreachable`  a plain reachability probe to the host the run actually
  *             talks to got no answer. Nothing can be streaming over a route
- *             that cannot carry a packet. This is the only case that aborts on
- *             evidence, and it is the one no socket event can report: dropping
- *             the network sends no FIN, and this machine's TCP keepalive is two
- *             hours (`net.inet.tcp.keepidle: 7200000`).
+ *             that cannot carry a packet. This is the case no socket event can
+ *             report: dropping the network sends no FIN, and this machine's TCP
+ *             keepalive is two hours (`net.inet.tcp.keepidle: 7200000`).
  *
  * Everything else is `unknown`, which every caller must treat as "behave exactly
  * as before". That is what keeps a Node without the diagnostics channel, or a
  * provider whose transport is not observable here, on the old path.
  *
+ * The request level is deliberately *not* used the way the socket level is not:
+ * an `UND_ERR_ABORTED` (a user's Stop) is never evidence, and a failure of a
+ * *short* request is never attributed to a run. Only a long-lived request's
+ * transport failure, on a host that is not local, in the window after the run's
+ * own last event, counts.
+ *
  * Nothing here opens a connection on its own, patches `fetch`, or reads a
- * payload: it observes sockets the SDK opened, and asks the network one question.
+ * payload: it observes sockets and requests the SDK opened, and asks the network
+ * one question.
  */
 import diagnosticsChannel from "node:diagnostics_channel";
 
@@ -63,8 +87,59 @@ const SAMPLE_MS = 5_000;
  *  so a false "alive" costs wording, while a false "silent" would cost a turn. */
 const RECENT_BYTES_MS = 30_000;
 
+/** How long a request must have been open before its transport failure can be
+ *  read as *this run's* streaming request.
+ *
+ *  This is the identity argument, and it is what makes a process-wide record
+ *  usable for an abort rather than only for wording. Every other HTTP call this
+ *  process makes — a model-catalog refresh, an MCP handshake, an extension's
+ *  fetch — finishes in milliseconds to seconds. A failure on a request that was
+ *  still open after a minute is a provider stream that was waiting for its
+ *  answer, and the wire is only consulted after `WIRE_CHECK_AFTER_MS` (90 s) of
+ *  a run's own silence, so the failing request has already outlived that.
+ *
+ *  Not lower: a long-polling MCP endpoint or an extension's slow fetch could sit
+ *  open for tens of seconds, and blaming the run for one of those is the one
+ *  mistake this layer must not make. */
+const LONG_REQUEST_MS = 60_000;
+
+/** Transport failure codes that mean the connection died under the request.
+ *
+ *  An allow-list, not a pattern match, because the inverse mistake is the one
+ *  that costs a turn: `UND_ERR_ABORTED` (and the DOMException `code: 20` that
+ *  reaches the channel when the user presses Stop) means *we* cancelled the
+ *  request, and must never be read as a broken connection. Codes are what npm
+ *  undici and Node's bundled undici both put on the error, so both transports
+ *  are covered by the same set. */
+const TRANSPORT_FAILURE_CODES = new Set([
+  "UND_ERR_SOCKET",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_CLOSED",
+  "UND_ERR_DESTROYED",
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+
+/** How many request records are kept. A bound rather than a timeout: the table
+ *  only has to cover the longest silence a caller asks about, and a leaked entry
+ *  would otherwise live for the life of the process. */
+const REQUESTS_MAX = 128;
+/** How long a finished request stays readable. Long enough to describe a silence
+ *  a caller is still asking about, short enough that a busy process does not
+ *  accumulate them. */
+const REQUEST_TTL_MS = 10 * 60_000;
+
 /** socket -> record, kept only while the socket is open. */
 const records = new Map();
+/** request -> record, for the request level. Keyed by the transport's own request
+ *  object so a chunk and its request are joined without any id of our own. */
+const requests = new Map();
 let sampler = null;
 let subscribed = false;
 /** Set while a reachability probe is opening its connection, so `track()` can
@@ -84,6 +159,31 @@ function isCursorHost(servername) {
   if (typeof servername !== "string" || !servername) return false;
   const host = servername.toLowerCase();
   return CURSOR_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+}
+
+/** Is this origin on this machine?
+ *
+ *  A loopback failure is a different incident (the pi-ui server's own port, an
+ *  MCP server on localhost, a local model) and must never be reported as "the
+ *  provider connection broke". Anything we cannot parse is treated as local, so
+ *  an unexpected shape fails towards saying nothing. */
+function isLocalOrigin(origin) {
+  if (typeof origin !== "string" || !origin) return true;
+  let host;
+  try {
+    host = new URL(origin).hostname;
+  } catch {
+    return true;
+  }
+  if (!host) return true;
+  const name = host.toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    name === "localhost" ||
+    name === "::1" ||
+    name === "0.0.0.0" ||
+    name.endsWith(".localhost") ||
+    /^127\./.test(name)
+  );
 }
 
 /** Advance every open record's byte counter. Cheap: one property read each. */
@@ -160,13 +260,83 @@ function track(socket) {
   });
 }
 
+/** Bound the request table: drop whatever finished longest ago.
+ *
+ *  Called on every create, so the table cannot grow past the cap even under a
+ *  burst, and the sort stays over a bounded list. */
+function pruneRequests(now = Date.now()) {
+  if (requests.size <= REQUESTS_MAX) return;
+  const finished = [];
+  for (const [key, record] of requests) {
+    const endedAt = record.completedAt || record.erroredAt || 0;
+    if (endedAt && now - endedAt > 0) finished.push([key, endedAt]);
+  }
+  finished.sort((a, b) => a[1] - b[1]);
+  for (const [key] of finished.slice(0, requests.size - REQUESTS_MAX)) requests.delete(key);
+}
+
+/** Record one request the transport opened. */
+function trackRequest(request) {
+  if (!request || typeof request !== "object" || requests.has(request)) return;
+  const origin = typeof request.origin === "string" ? request.origin : "";
+  requests.set(request, {
+    origin,
+    method: typeof request.method === "string" ? request.method : "",
+    startedAt: Date.now(),
+    lastChunkAt: 0,
+    completedAt: 0,
+    erroredAt: 0,
+    code: "",
+    aborted: false,
+    // The reachability probe's own request must never become evidence about the
+    // run: a failing probe would otherwise prove itself.
+    probe: Boolean(probeWindow),
+    local: isLocalOrigin(origin),
+  });
+  pruneRequests();
+}
+
+/** Forget requests that finished long enough ago to describe nothing. */
+function pruneStaleRequests(now = Date.now()) {
+  for (const [key, record] of requests) {
+    const endedAt = record.completedAt || record.erroredAt || 0;
+    if (endedAt && now - endedAt > REQUEST_TTL_MS) requests.delete(key);
+  }
+}
+
 /** Subscribe once. Idempotent, and safe on a Node that does not publish the
- *  channel: `subscribe` on an unused channel name simply never fires. */
+ *  channels: `subscribe` on an unused channel name simply never fires, which is
+ *  what keeps a Node or a transport without them on the old path. */
 export function watchWire() {
   if (subscribed) return;
   subscribed = true;
   diagnosticsChannel.subscribe("net.client.socket", ({ socket }) => {
     if (socket) track(socket);
+  });
+  // Request level: the same evidence `net.client.socket` cannot give. A socket's
+  // close proves nothing (see the table above), but a request that failed with a
+  // transport code proves the connection died *under that request*, and a body
+  // chunk proves frames are arriving without needing to know who the provider is.
+  diagnosticsChannel.subscribe("undici:request:create", ({ request }) => trackRequest(request));
+  diagnosticsChannel.subscribe("undici:request:bodyChunkReceived", ({ request }) => {
+    const record = requests.get(request);
+    if (record) record.lastChunkAt = Date.now();
+  });
+  diagnosticsChannel.subscribe("undici:request:trailers", ({ request }) => {
+    const record = requests.get(request);
+    // A completed response is not evidence of a fault; it is kept only so its
+    // buffered chunks still count as recent life until the TTL drops it.
+    if (record && !record.completedAt) record.completedAt = Date.now();
+  });
+  diagnosticsChannel.subscribe("undici:request:error", ({ request, error }) => {
+    const record = requests.get(request);
+    if (!record) return;
+    record.erroredAt = Date.now();
+    record.code = typeof error?.code === "string" ? error.code : "";
+    // `AbortError` arrives as a DOMException whose `code` is the number 20 and
+    // whose `name` is what actually identifies it; the request's own flag is the
+    // third spelling. Any of them means we cancelled it, so it is not evidence.
+    record.aborted = Boolean(request?.aborted) || error?.name === "AbortError";
   });
 }
 
@@ -183,7 +353,7 @@ export function watchWire() {
  * therefore reads as `alive` here, which only keeps this session's warning
  * factual-sounding and never aborts: the conservative direction.
  *
- * @param {Array<{cursor?: boolean, probe?: boolean, openedAt?: number, lastBytesAt?: number}>} list
+ * @param {Iterable<{cursor?: boolean, probe?: boolean, openedAt?: number, lastBytesAt?: number}>} list
  * @param {{ now?: number, recentMs?: number }} [options]
  * @returns {{ state: "alive"|"unknown", lastBytesAgoMs: number|null }}
  */
@@ -209,6 +379,79 @@ export function wireVerdict(options = {}) {
   const now = Date.now();
   sample(now);
   return classifyWire(records.values(), { ...options, now });
+}
+
+/**
+ * Reduce the recorded requests to one verdict about the transport.
+ *
+ * Pure, so the smoke test can drive it with synthetic records instead of a real
+ * connection. Three states, and only one of them may end a run early:
+ *
+ *  - `broken`   a long-lived request to a non-local origin failed with a
+ *               transport code after `since`, and no bytes arrived on any
+ *               request afterwards. `since` is the run's own last event, which
+ *               is what keeps a *recovered* run out of this state: pi emits
+ *               `auto_retry_start` before it retries, so a retry moves `since`
+ *               past the failure and the failure stops describing the silence.
+ *  - `alive`    a response body delivered a chunk within `recentMs`.
+ *  - `unknown`  anything else, including a short request's failure and every
+ *               failure that predates `since`.
+ *
+ * `lastChunkAgoMs` is reported in every state because a caller may want to say
+ * how long the silence has been measurable on the wire, not just whether it is.
+ *
+ * @param {Iterable<{origin?: string, startedAt?: number, lastChunkAt?: number, erroredAt?: number, code?: string, aborted?: boolean, probe?: boolean, local?: boolean}>} list
+ * @param {{ now?: number, since?: number, minOpenMs?: number, recentMs?: number }} [options]
+ * @returns {{ state: "broken"|"alive"|"unknown", lastChunkAgoMs: number|null, code?: string, at?: number, origin?: string, openMs?: number }}
+ */
+export function classifyTransport(list, options = {}) {
+  const now = options.now ?? Date.now();
+  const since = options.since ?? 0;
+  const minOpenMs = options.minOpenMs ?? LONG_REQUEST_MS;
+  const recentMs = options.recentMs ?? RECENT_BYTES_MS;
+  let failure = null;
+  let lastChunkAt = 0;
+  for (const record of list) {
+    if (!record || record.probe || record.local) continue;
+    if (record.lastChunkAt > lastChunkAt) lastChunkAt = record.lastChunkAt;
+    if (!record.erroredAt || record.aborted) continue;
+    if (!TRANSPORT_FAILURE_CODES.has(record.code)) continue;
+    // Before the run went quiet: the SDK has already said what happened, and
+    // `since` moving past it is exactly how a retry clears this.
+    if (record.erroredAt <= since) continue;
+    const openMs = record.erroredAt - (record.startedAt || record.erroredAt);
+    if (openMs < minOpenMs) continue;
+    if (!failure || record.erroredAt > failure.at) {
+      failure = { code: record.code, at: record.erroredAt, origin: record.origin || "", openMs };
+    }
+  }
+  const lastChunkAgoMs = lastChunkAt ? Math.max(0, now - lastChunkAt) : null;
+  // Bytes arriving after the failure mean a later request is carrying the run:
+  // the failure describes a request the run already left behind.
+  if (failure && lastChunkAt > failure.at) failure = null;
+  if (failure) return { state: "broken", lastChunkAgoMs, ...failure };
+  if (lastChunkAt && lastChunkAgoMs != null && lastChunkAgoMs <= recentMs) {
+    return { state: "alive", lastChunkAgoMs };
+  }
+  return { state: "unknown", lastChunkAgoMs };
+}
+
+/**
+ * The live transport verdict for one run's silence.
+ *
+ * `since` is the run's last event. The records are process-wide because the
+ * diagnostics channels carry no session id, so the identity argument lives in
+ * `classifyTransport`: only a request that was open longer than any short call
+ * is attributed to a run, and only failures newer than that run's own last event
+ * are considered.
+ *
+ * @param {{ since?: number, now?: number, minOpenMs?: number }} [options]
+ */
+export function transportVerdict(options = {}) {
+  watchWire();
+  const now = options.now ?? Date.now();
+  pruneStaleRequests(now);
+  return classifyTransport(requests.values(), { ...options, now });
 }
 
 /**
@@ -282,6 +525,7 @@ export function wireHost() {
 /** Test hook: drop everything, so a test does not inherit a previous case. */
 export function __resetWireForTests() {
   records.clear();
+  requests.clear();
   probes.clear();
   lastCursorHost = "";
   if (sampler) clearInterval(sampler);
@@ -294,4 +538,6 @@ export const __wireConstants = {
   CURSOR_HOST_SUFFIXES,
   PROBE_TIMEOUT_MS,
   PROBE_CACHE_MS,
+  LONG_REQUEST_MS,
+  TRANSPORT_FAILURE_CODES,
 };

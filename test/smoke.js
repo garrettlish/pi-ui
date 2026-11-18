@@ -1296,6 +1296,111 @@ try {
     check("no socket records read as unknown", wire.classifyWire([], { now }).state === "unknown");
     check("wire.js has only the two verdicts it can prove", !/state: "dead"/.test(fs.readFileSync(new URL("../sdk/wire.js", import.meta.url), "utf8")));
   }
+  // The request level is the second evidence source, and the only one that is
+  // provider-agnostic. Driven with synthetic records for the same reason as the
+  // socket half: the facts are what matter, not a real connection. Each case
+  // below is one of the ways this layer could cost a turn if it were wrong.
+  {
+    const wire = await import(new URL("../sdk/wire.js", import.meta.url).href);
+    const now = 10_000_000;
+    const S = 1000;
+    // A provider stream: opened 3 minutes ago, failed a moment ago.
+    const stream = (extra) =>
+      ({
+        origin: "https://api.example.com",
+        startedAt: now - 180 * S,
+        lastChunkAt: 0,
+        erroredAt: 0,
+        code: "",
+        aborted: false,
+        probe: false,
+        local: false,
+        ...extra,
+      });
+
+    const broken = wire.classifyTransport([stream({ erroredAt: now - 2 * S, code: "UND_ERR_SOCKET" })], { now, since: now - 100 * S });
+    check("a long-lived provider request that died reads as broken", broken.state === "broken", broken.state);
+    check("the transport verdict names the code", broken.code === "UND_ERR_SOCKET", broken.code);
+
+    // The failure mode this layer must not have: blaming the run for a request
+    // that was never the run. A short call (model catalog, MCP handshake, an
+    // extension's fetch) dies in seconds and proves nothing about the stream.
+    const short = wire.classifyTransport(
+      [stream({ startedAt: now - 400 * S, erroredAt: now - 399 * S, code: "UND_ERR_SOCKET" })],
+      { now, since: now - 100 * S }
+    );
+    check("a short request's failure is not attributed to the run", short.state === "unknown", short.state);
+
+    // Stop is a cancellation, not a broken connection. Its code arrives as the
+    // string "20" from a DOMException, so an allow-list alone is not enough —
+    // `aborted` is what excludes it.
+    const stopped = wire.classifyTransport([stream({ erroredAt: now - 2 * S, code: "UND_ERR_ABORTED", aborted: true })], {
+      now,
+      since: now - 100 * S,
+    });
+    check("a user's Stop is not a broken connection", stopped.state === "unknown", stopped.state);
+
+    // pi emits `auto_retry_start` before retrying, so a retry moves `since` past
+    // the failure and the run is no longer described by it. Without this a run
+    // that recovered would still be aborted by its own first error.
+    const recovered = wire.classifyTransport([stream({ erroredAt: now - 50 * S, code: "UND_ERR_SOCKET" })], {
+      now,
+      since: now - 10 * S,
+    });
+    check("a failure the run already recovered from is not evidence", recovered.state === "unknown", recovered.state);
+
+    // Bytes arriving after the failure mean a later request carries the run, so
+    // the failure describes a request the run has already left behind.
+    const resumed = wire.classifyTransport(
+      [stream({ erroredAt: now - 5 * S, code: "UND_ERR_SOCKET" }), stream({ startedAt: now - 3 * S, lastChunkAt: now - S })],
+      { now, since: now - 100 * S }
+    );
+    check("traffic after a failure retires it", resumed.state === "alive", resumed.state);
+
+    const flowing = wire.classifyTransport([stream({ lastChunkAt: now - 2 * S })], { now, since: now - 100 * S });
+    check("a response body still delivering chunks reads as alive", flowing.state === "alive", flowing.state);
+
+    // Undici recycles a healthy idle connection's socket without failing the
+    // request — measured 2026-11-18: a completed request emits `trailers` and no
+    // `error`. So a *completed* request must never become a verdict.
+    const completed = wire.classifyTransport([stream({ lastChunkAt: now - 200 * S, completedAt: now - 199 * S })], {
+      now,
+      since: now - 100 * S,
+    });
+    check("a request that completed is not evidence of a fault", completed.state === "unknown", completed.state);
+
+    // A localhost failure is a different incident (pi-ui's own port, a local
+    // MCP server, a local model) and must never read as "the provider broke".
+    const localFail = wire.classifyTransport(
+      [stream({ origin: "http://127.0.0.1:8000", local: true, erroredAt: now - 2 * S, code: "ECONNREFUSED" })],
+      { now, since: now - 100 * S }
+    );
+    check("a local failure is not a provider failure", localFail.state === "unknown", localFail.state);
+
+    // The probe's own request must not prove itself.
+    const probeFail = wire.classifyTransport([stream({ probe: true, erroredAt: now - 2 * S, code: "UND_ERR_BODY_TIMEOUT" })], {
+      now,
+      since: now - 100 * S,
+    });
+    check("the reachability probe's own request is not evidence", probeFail.state === "unknown", probeFail.state);
+
+    // No records at all — a Node without the channels, or a transport that does
+    // not publish them: every caller must land on the old behaviour.
+    check("no request records read as unknown", wire.classifyTransport([], { now, since: 0 }).state === "unknown");
+    // A body timeout is the fact no socket event can produce on this machine: it
+    // is what a peer that stops sending without a FIN looks like.
+    const starved = wire.classifyTransport([stream({ erroredAt: now - 2 * S, code: "UND_ERR_BODY_TIMEOUT" })], {
+      now,
+      since: now - 100 * S,
+    });
+    check("a starved body timeout reads as broken", starved.state === "broken", starved.state);
+    // Anything outside the allow-list is not a verdict, however it is spelled.
+    const unknownCode = wire.classifyTransport([stream({ erroredAt: now - 2 * S, code: "SOMETHING_ELSE" })], {
+      now,
+      since: now - 100 * S,
+    });
+    check("an unrecognised error code is not a verdict", unknownCode.state === "unknown", unknownCode.state);
+  }
   // Early abort is gated on the wire on purpose: the frontend's first warning
   // is 60 s, so a check before that would spend a request on a run that is
   // about to answer (first token: 26 s median, 91 s p90 on this machine).
@@ -1305,9 +1410,33 @@ try {
     check("the wire is consulted after, not before, the first warning", wireAfter >= 60_000, String(wireAfter));
     check("no tool means no side effect, so a proven dead connection may re-send", /#canAutoRetry\(session\)[\s\S]{0,400}toolCallsThisRun > 0/.test(hostJs));
     check("the automatic re-send is capped", /AUTO_RETRY_MAX = 1\b/.test(hostJs));
-    // Only an unreachable host is proof the prompt never arrived; silence plus a
-    // closed socket is not, so the fallback keeps its old manual-retry message.
-    check("only an unreachable host may re-send on its own", /const proven = reason === "network unreachable";/.test(hostJs));
+    // Re-sending on its own requires *evidence*, not silence: the fallback fires
+    // on the 5-minute deadline and must stay manual. There are now two
+    // evidence-backed reasons — a probe that got no answer, and a long-lived
+    // provider request that died with a transport code — and the intent of this
+    // assertion is that the reason list is closed and explicit. Anything else
+    // (including the fallback) stays unproven.
+    check(
+      "only an evidence-backed reason may re-send on its own",
+      /const proven = reason === "network unreachable" \|\| reason === "transport failed";/.test(hostJs)
+    );
+    // The transport verdict must be gated on the run's own last event, or a run
+    // that recovered would be aborted by the failure its retry already cleared.
+    check("the transport verdict is scoped to this run's silence", /transportVerdict\(\{ since \}\)/.test(hostJs));
+    // A local command says nothing about the provider connection, so a running
+    // tool must not suppress a transport failure — only the silence-based halves.
+    // Compared by position rather than by a character count, so a comment edit
+    // cannot silently break the assertion.
+    {
+      const body = /async #checkWireForStall\(session, silentFor, now\) \{([\s\S]*?)\n  \}/.exec(hostJs)?.[1] ?? "";
+      const evidenceAt = body.indexOf('transport.state === "broken"');
+      const toolGateAt = body.indexOf("if (toolRunning) return;");
+      check(
+        "a running tool does not suppress positive transport evidence",
+        evidenceAt >= 0 && toolGateAt > evidenceAt,
+        `${evidenceAt} vs ${toolGateAt}`
+      );
+    }
     check("the tab is told a re-send is underway", hostJs.includes('event: "run_retrying"') && appJs.includes('record.event === "run_retrying"'));
     // A steer is mid-run text, not the turn's opening message: replaying it
     // would present an instruction as a prompt the user never re-sent.

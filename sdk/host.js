@@ -40,7 +40,7 @@ import { randomUUID } from "node:crypto";
 import { toJsonEvent } from "./events.js";
 import { ImageStash, offloadEntries } from "./images.js";
 import { ExtensionUi } from "./ui-context.js";
-import { watchWire, wireVerdict, wireHost, probeHost } from "./wire.js";
+import { wireVerdict, wireHost, probeHost, transportVerdict } from "./wire.js";
 
 /** Idle sessions with no attached browser are disposed after this long. */
 const IDLE_REAP_MS = 30 * 60 * 1000;
@@ -68,7 +68,13 @@ const STALL_ABORT_AFTER_MS = 5 * 60 * 1000;
  *  Below this, a run is simply working: measured over this machine's 791 Cursor
  *  turns, a first token arrives in 26 s at the median and 91 s at p90, so
  *  probing earlier would spend requests on runs that are about to answer.
- */
+ *
+ *  This is also the reason no constant here is tied to the transport's own
+ *  `bodyTimeout` (300 s by default): the wire is asked repeatedly from 90 s on,
+ *  so a request that dies with `UND_ERR_SOCKET` at 120 s is noticed at the next
+ *  sweep, and one that starves until `UND_ERR_BODY_TIMEOUT` at 300 s is noticed
+ *  when that error lands. The deadline stays a fallback rather than the only
+ *  signal, and the gap between 90 s and 300 s is no longer spent guessing. */
 const WIRE_CHECK_AFTER_MS = 90 * 1000;
 
 /** Automatic re-sends allowed per prompt when a *proven* dead connection is
@@ -1159,8 +1165,9 @@ export class SessionHost {
   /**
    * Ask the network whether a short silence is a dead connection.
    *
-   * Two steps, in increasing cost: read the sockets the SDK already owns, then
-   * — only if those say nothing — send one reachability probe.
+   * Three steps, in increasing cost: read the requests the transport already
+   * failed, then the sockets the SDK owns, then — only if those say nothing —
+   * send one reachability probe.
    *
    * Fire-and-forget, and re-asked on `WIRE_RECHECK_MS`: the first probe can
    * succeed while the route drops later, so a run that outlives its connection
@@ -1171,23 +1178,46 @@ export class SessionHost {
     if (silentFor < WIRE_CHECK_AFTER_MS) return;
     // One check per interval, not per sweep (the sweep runs every 15 s).
     if (session.wireCheckedAt && now - session.wireCheckedAt < WIRE_RECHECK_MS) return;
-    // Only the Cursor transport is observable here. The socket records are
-    // process-wide, so a Cursor connection another session opened must never
-    // become evidence about an Anthropic or OpenAI run. Their transports are
-    // not observable and keep the old fallback untouched.
-    if (session.session?.model?.provider !== "cursor") return;
-    // A tool that is running is the reason there are no events: a build, a test
-    // suite or a long `grep` emits nothing for its whole duration. Neither check
-    // knows anything about a local command, and this branch runs at 90 s where
-    // that is the common case. The fallback keeps its old behaviour for a tool
-    // that really has hung, and the UI names the call either way.
-    if (session.runningTools > 0) return;
     session.wireCheckedAt = now;
     const since = session.lastActivity;
+    // A tool that is running is the reason there are no events: a build, a test
+    // suite or a long `grep` emits nothing for its whole duration. That is why
+    // no *inference from silence* may run here — but it is not a reason to
+    // ignore a transport that has already reported an error. A local command
+    // says nothing about whether the provider connection under this run is
+    // still alive, so the request-level check below is done either way and only
+    // the silence-based halves are skipped.
+    const toolRunning = session.runningTools > 0;
+    // Request level first: this is the only *positive* evidence of a dead
+    // connection, and unlike the socket records it needs no provider allow-list,
+    // so a Cursor, WorkBuddy or Anthropic run is all covered by the same check.
+    // `since` is what keeps a run that already recovered out of this: pi emits
+    // `auto_retry_start` before retrying, which moves `since` past the failure.
+    const transport = transportVerdict({ since });
+    if (transport.state === "broken") {
+      this.#abortStalled(session, silentFor, {
+        reason: "transport failed",
+        detail: `${transport.code} on ${transport.origin || "the provider"} after ${Math.round(
+          (transport.openMs || 0) / 1000
+        )}s`,
+      });
+      return;
+    }
+    // Everything below only ever *softens* the wait, so a running tool decides
+    // it: a long build is a silence with a known cause.
+    if (toolRunning) return;
+    // Only the Cursor transport is observable at the socket level. The socket
+    // records are process-wide, so a Cursor connection another session opened
+    // must never become evidence about a WorkBuddy or Anthropic run. Those keep
+    // the fallback for the socket half, while the request half above already
+    // covered them.
+    if (session.session?.model?.provider !== "cursor") return;
     // A socket carrying bytes proves the transport is up: say so once, and let
     // the fallback own the decision. This is the only use of the socket layer —
     // a *closed* socket is not evidence of anything (see `sdk/wire.js`).
-    if (wireVerdict().state === "alive") {
+    // The request level is consulted too, because its chunk counter sees the
+    // same traffic through a transport-agnostic channel.
+    if (wireVerdict().state === "alive" || transport.state === "alive") {
       if (!session.wireAliveNoticed) {
         session.wireAliveNoticed = true;
         session.broadcast({
@@ -1223,16 +1253,32 @@ export class SessionHost {
   /**
    * End one silent run and say why.
    *
-   * `reason` decides two things: the sentence, and whether the turn can be
-   * re-sent on its own. Only `network unreachable` qualifies — the probe got no
-   * answer, so nothing can have been streaming, and the prompt provably never
-   * reached the provider. Re-sending it finishes a message that never arrived
-   * rather than repeating work. That is still only true if the run put nothing
-   * on screen and executed no tool: a tool call is a side effect, and running
-   * one twice is worse than losing the turn.
+   * `reason` decides three things: the sentence, whether the failure was *proven*
+   * by evidence rather than inferred from silence, and — through `proven` —
+   * whether the turn can be re-sent without the user asking.
+   *
+   * Two reasons are evidence-backed, and they are different evidence:
+   *
+   *  - `network unreachable` — a probe got no answer, so nothing can have been
+   *    streaming and the prompt provably never reached the provider.
+   *  - `transport failed` — a long-lived provider request died with a transport
+   *    error after this run's last event. That proves the *connection* is gone,
+   *    which is all the abort needs; it does not prove the prompt never arrived,
+   *    because it may have died mid-answer. The sentence says so rather than
+   *    reusing the unreachable wording.
+   *
+   * Re-sending is safe for both for the same reason, and it is not the reason
+   * someone would guess: the guarantee is `#canAutoRetry`, which refuses a turn
+   * that rendered anything or ran any tool. So the worst case of a re-send is a
+   * second generation the reader never saw, bounded by `AUTO_RETRY_MAX`; the
+   * alternative is a turn the user has to notice and retype.
    *
    * The 5-minute fallback keeps the old behaviour entirely: it fires on silence
-   * alone, which is not evidence the provider never saw the request.
+   * alone, which is not evidence of anything, so it stays unproven and manual.
+   *
+   * @param {Session} session
+   * @param {number} silentFor
+   * @param {{ reason?: string, detail?: string }} [options]
    */
   #abortStalled(session, silentFor, { reason, detail } = {}) {
     const key = session.key;
@@ -1241,8 +1287,10 @@ export class SessionHost {
     const why =
       reason === "network unreachable"
         ? `the provider could not be reached (${detail ?? "network error"})`
-        : "the connection may have dropped";
-    const proven = reason === "network unreachable";
+        : reason === "transport failed"
+          ? `the connection to the provider failed (${detail ?? "transport error"})`
+          : "the connection may have dropped";
+    const proven = reason === "network unreachable" || reason === "transport failed";
     const canResend = proven && this.#canAutoRetry(session);
     console.error(
       `[pi-ui] run silent for ${seconds}s (key=${key}) — ${why}${canResend ? "; re-sending" : "; aborting"}`
