@@ -72,7 +72,7 @@
         </button>
         <span id="crumb-name"></span>
       </div>
-      <input id="session-filter" type="search" placeholder="Filter sessions...">
+      <input id="session-filter" type="search" placeholder="Filter sessions..." aria-label="Filter sessions">
       <div id="session-list" class="session-list"></div>
       <div id="sidebar-foot">
         <div id="pi-status" class="pi-status">connecting…</div>
@@ -134,6 +134,26 @@
 
       <div id="transcript-wrap">
         <div id="transcript" tabindex="0"></div>
+        <!-- A session with no turns yet. Without this the first screen was two
+             metadata chips over an empty field: nothing named the workspace,
+             nothing said what pi does with it, and nothing pointed at the
+             shortcuts that make the composer usable. Shown by
+             updateEmptyState() whenever the open session holds no turns. -->
+        <div id="transcript-empty" class="hidden">
+          <div class="te-body">
+            <h1 class="te-title">New session</h1>
+            <p class="te-lede">
+              Nothing sent yet. pi reads, runs and edits files inside
+              <code id="te-workspace">this workspace</code>.
+            </p>
+            <ul class="te-tips">
+              <li><span class="te-keys"><kbd>/</kbd></span><span>commands and skills for this project</span></li>
+              <li><span class="te-keys"><kbd>⌘K</kbd></span><span>search every past session</span></li>
+              <li><span class="te-keys"><kbd>⏎</kbd><kbd>⇧⏎</kbd></span><span>send · new line</span></li>
+              <li><span class="te-keys"></span><span>drop a file anywhere to attach it</span></li>
+            </ul>
+          </div>
+        </div>
         <button id="btn-jump" class="hidden" title="Jump to latest">↓ latest</button>
       </div>
 
@@ -172,15 +192,21 @@
         <div id="queue-bar" class="hidden"></div>
         <div id="composer">
           <div id="attachments" class="attachments hidden"></div>
-          <textarea id="input" rows="1" placeholder="Message pi…  (type / for commands & skills, attach or drop files, Enter to send, Shift+Enter for newline)"></textarea>
-          <div class="composer-row">
-            <button id="btn-attach" class="icon-btn" title="Attach files (images, PDF, Word, HTML, text)" aria-label="Attach files">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.6-2.6l7.6-7.6"/></svg>
-            </button>
-            <input id="file-input" type="file" accept="image/*,.pdf,.docx,.html,.htm,.txt,.md,.markdown,.csv,.json,.log,.yaml,.yml" multiple class="hidden" aria-hidden="true" tabindex="-1">
-            <span class="hint dim" id="composer-hint"></span>
-            <span class="spacer"></span>
-            <button id="btn-send">Send</button>
+          <!-- One surface for typing, attaching and sending. The controls used
+               to sit on the dock *below* the input's own card, so on any
+               palette the Send button read as a chip floating on the page
+               rather than as the action of the field above it. -->
+          <div id="composer-field" class="composer-field">
+            <textarea id="input" rows="1" placeholder="Message pi…" aria-label="Message pi"></textarea>
+            <div class="composer-row">
+              <button id="btn-attach" class="icon-btn" title="Attach files (images, PDF, Word, HTML, text)" aria-label="Attach files">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.6-2.6l7.6-7.6"/></svg>
+              </button>
+              <input id="file-input" type="file" accept="image/*,.pdf,.docx,.html,.htm,.txt,.md,.markdown,.csv,.json,.log,.yaml,.yml" multiple class="hidden" aria-hidden="true" tabindex="-1">
+              <span class="hint dim" id="composer-hint"></span>
+              <span class="spacer"></span>
+              <button id="btn-send">Send</button>
+            </div>
           </div>
         </div>
       </div>

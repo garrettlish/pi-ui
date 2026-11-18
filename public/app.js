@@ -7,6 +7,11 @@
 // tiny helpers
 // ---------------------------------------------------------------------------
 const $ = (sel) => document.querySelector(sel);
+/** The quiet legend beside Send. It replaces the paragraph that used to live in
+ *  the placeholder ("type / for commands & skills, attach or drop files, Enter
+ *  to send…"), which was re-read after every send, clipped at narrow widths and
+ *  competed with the draft for attention. */
+const HINT_IDLE = "/ commands · ⇧⏎ new line";
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -3328,6 +3333,34 @@ document.addEventListener("click", (e) => {
   );
 });
 
+/** True while a session switch is still replaying. The empty state must not
+ *  appear during that window: a session that is loading has no turns yet either,
+ *  and flashing "New session" over one being read is worse than a blank field. */
+let sessionLoading = false;
+
+/** Does the open session hold anything the reader wrote, or pi answered?
+ *  Notices count as metadata, not content: a fresh session opens with two of
+ *  them ("model → …", "thinking level → …") and is still empty. */
+function sessionHasTurns() {
+  return state.items.some((i) => i.kind === "user" || i.kind === "assistant");
+}
+
+/** The first-run panel, for a session that has no turns yet. Before this the
+ *  opening screen was two metadata chips over an empty field: it never named
+ *  the workspace pi would act on, and never mentioned the shortcuts that make
+ *  the composer usable. Hidden as soon as a turn exists (or when a follow-up
+ *  is on screen, whose section already replaces the transcript). */
+function updateEmptyState() {
+  const empty = !sessionLoading && !state.openFollowup && !sessionHasTurns();
+  $("#transcript-empty").classList.toggle("hidden", !empty);
+  if (!empty) return;
+  const target = $("#te-workspace");
+  if (!target) return;
+  const ws = state.workspace || state.cwd || "";
+  target.textContent = ws ? wsLabel(ws) : "this workspace";
+  target.title = ws;
+}
+
 function renderTranscript({ follow = true } = {}) {
   const nearBottom = transcriptAtBottom();
   // A reader who scrolled up during a stream must not be dragged back by the
@@ -3374,6 +3407,7 @@ function renderTranscript({ follow = true } = {}) {
   if (follow && nearBottom) scrollBottom();
   updateJumpButton();
   syncThinkingToggle();
+  updateEmptyState();
   hydrateMermaid(transcriptEl, { follow: follow && nearBottom });
 }
 
@@ -3509,7 +3543,17 @@ function currentSessionMeta() {
 
 function renderHeader() {
   const meta = currentSessionMeta();
-  const fallback = state.sessionFile ? state.sessionFile.split("/").pop().replace(/\.jsonl$/, "") : "—";
+  // A session nobody has written to yet has no title, no first prompt to borrow
+  // one from, and its file name is an ISO stamp plus a uuid — printing that in
+  // the header read like an error message. "New session" is what it is.
+  // A title-less session *with* messages keeps the file stem, so those stay
+  // distinguishable from each other.
+  const knownEmpty = meta ? !meta.messages : state.sessions.length > 0;
+  const fallback = !state.sessionFile
+    ? "—"
+    : knownEmpty
+      ? "New session"
+      : state.sessionFile.split("/").pop().replace(/\.jsonl$/, "");
   // a follow-up on screen is what the tab is reading, even though the session
   // stays attached underneath: the header has to name the thing being read
   $("#session-name").textContent = state.openFollowup
@@ -6032,7 +6076,7 @@ async function sendPrompt() {
   try {
     const res = await cmd("prompt", { message, ...extra });
     const disp = res.data?.disposition;
-    $("#composer-hint").textContent = disp ? `disposition: ${disp}` : "";
+    $("#composer-hint").textContent = disp ? `disposition: ${disp}` : HINT_IDLE;
   } catch (err) {
     // if racing a running agent, retry as steer (steer accepts images too)
     if (state.isStreaming) {
@@ -6202,9 +6246,10 @@ async function switchSession(file, cwd) {
   state.isCompacting = false;
   state.lastActivityAt = null;
   currentAssistant = null;
-  $("#composer-hint").textContent = "";
+  $("#composer-hint").textContent = HINT_IDLE;
   renderStatus(); // drop the previous session's queue chips now, not after the spawn
   const cached = viewCache.get(file);
+  sessionLoading = !cached;
   state.items = cached ? cached.items : [{ kind: "notice", text: "loading session…" }];
   state.leafId = cached ? cached.leafId : null;
   renderTranscript({ follow: false });
@@ -6233,11 +6278,14 @@ async function switchSession(file, cwd) {
     await waitPiReady(file);
     if (gen !== switchGen) return;
     await refreshCachedView(file);
+    sessionLoading = false;
+    updateEmptyState();
     restoreScroll(file); // re-renders above may have moved the offset
     renderSidebar(); // re-render so the .active highlight follows the clicked row
   } catch (err) {
     if (gen !== switchGen) return;
     // Revert the optimistic switch: put the previous session's view back.
+    sessionLoading = false;
     state.sessionFile = prevFile;
     state.items = prevView.items;
     state.leafId = prevView.leafId;
@@ -6286,11 +6334,14 @@ async function newSession() {
     state.lastActivityAt = null;
     currentAssistant = null;
     // clear the transcript immediately — refresh() below rebuilds from the
-    // fresh (empty) session, but this makes the reset visible without delay
+    // fresh (empty) session, but this makes the reset visible without delay.
+    // A switch abandoned mid-replay can leave the flag set, so clear it here:
+    // this session is empty by construction, not still loading.
+    sessionLoading = false;
     state.items = [];
     renderTranscript({ follow: false });
     transcriptEl.scrollTop = 0;
-    $("#composer-hint").textContent = "";
+    $("#composer-hint").textContent = HINT_IDLE;
     await refresh({ sessions: true });
     syncHash();
   } catch (err) {
@@ -8142,5 +8193,6 @@ function connectEvents() {
     syncHash();
   }
   if (hs?.followup) await openFollowup(hs.followup);
+  $("#composer-hint").textContent = HINT_IDLE;
   inputEl.focus();
 })();

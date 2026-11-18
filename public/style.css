@@ -1298,6 +1298,47 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 }
 #btn-jump:hover { background: var(--elevated); color: var(--text); }
 
+/* A session with no turns yet. It carries no background of its own: the two
+   metadata chips a fresh session opens with (model, thinking level) stay
+   readable above it, and nothing covers the transcript's scroll surface.
+   pointer-events stay off so a click meant for the transcript goes through. */
+#transcript-empty {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px 24px 72px;
+  pointer-events: none;
+}
+.te-body { max-width: 400px; }
+.te-title {
+  margin: 0 0 7px;
+  font-size: 17px; font-weight: 600; letter-spacing: -0.2px; color: var(--text);
+}
+.te-lede {
+  margin: 0 0 20px;
+  font-size: 13px; line-height: 1.65; color: var(--text-2);
+}
+.te-lede code {
+  padding: 1px 5px; border-radius: var(--radius-xs);
+  background: var(--surface); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11.5px; color: var(--text);
+  white-space: nowrap;
+}
+.te-tips { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.te-tips li {
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: 12.5px; color: var(--text-3);
+}
+/* the key column is fixed, so the sentences line up even though "/" and "⌘K"
+   are not the same width; the chips are right-aligned inside it so each one
+   sits next to the words it introduces */
+.te-keys { flex: none; display: flex; gap: 4px; width: 62px; justify-content: flex-end; }
+.te-tips kbd {
+  padding: 1px 5px; min-width: 20px; text-align: center;
+  border: 1px solid var(--border); border-radius: var(--radius-xs);
+  background: var(--surface); color: var(--text-2);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
+}
+
 /* Long transcripts skip layout for off-screen items.
  *
  * A 17.7 MB session renders 3,260 items / 63,404 nodes / 550,127 px of scroll
@@ -1324,8 +1365,11 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 }
 /* user turn: a filled card, because a prompt is an object the reader wrote, not
    flowing prose. Assistant turns carry no container at all: content is the
-   interface, and boxing it would put a border between the reader and the text. */
+   interface, and boxing it would put a border between the reader and the text.
+   The card hugs its text: as a full-width block a one-line prompt ("commit and
+   push") painted a 1191 px band with a single line of ink in the corner. */
 .item-user {
+  width: fit-content; max-width: 100%;
   border: 1px solid var(--border);
   background: var(--elevated);
   border-radius: var(--radius-lg);
@@ -2126,21 +2170,32 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
 #composer { position: relative; padding: 10px 16px 12px; }
 /* inside the dock the divider belongs to the dock, not to the composer */
 #composer-dock #composer { border-top: none; }
-#input {
-  display: block; width: 100%; max-height: 200px; resize: none;
-  padding: 9px 12px;
-  background: var(--surface); color: var(--text);
+/* The field is the surface: input on top, controls on its own line, one border
+   around both. Before this the input was a card and the row sat under it on the
+   dock's translucent fill, which is nearly the page colour — so Send and the
+   attach control looked detached from the thing they act on. */
+.composer-field {
+  padding: 4px 5px 4px 11px;
+  background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius-lg);
-  font-family: var(--font-ui); font-size: 13.5px; line-height: 1.5;
-  outline: none;
   box-shadow: var(--shadow-sm);
   transition: border-color 0.14s ease, box-shadow 0.14s ease;
 }
-#input::placeholder { color: var(--text-3); }
-#input:focus {
+.composer-field:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-tint), var(--shadow-sm);
 }
+#input {
+  display: block; width: 100%; max-height: 200px; resize: none;
+  padding: 5px 6px 2px 1px;
+  background: transparent; color: var(--text);
+  border: none; border-radius: 0;
+  font-family: var(--font-ui); font-size: 13.5px; line-height: 1.5;
+  outline: none; box-shadow: none;
+}
+#input::placeholder { color: var(--text-3); }
+/* the ring belongs to the field, not to the textarea inside it */
+#composer-field #input:focus-visible { outline: none; }
 
 /* slash-command autocomplete */
 .cmd-menu {
@@ -2172,7 +2227,7 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
 }
 
 /* image attachments (dropped anywhere on the page, or picked) */
-body.dropping #input { border-color: var(--accent); border-style: dashed; box-shadow: 0 0 0 3px var(--accent-tint); }
+body.dropping .composer-field { border-color: var(--accent); border-style: dashed; box-shadow: 0 0 0 3px var(--accent-tint); }
 .attachments {
   display: flex; flex-wrap: wrap; gap: var(--space-2);
   margin-bottom: var(--space-2);
@@ -2232,12 +2287,12 @@ body.dropping #input { border-color: var(--accent); border-style: dashed; box-sh
   font-family: var(--mono); font-size: 12px; line-height: 1.55; color: var(--text-2);
 }
 
-.composer-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.composer-row { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
 #btn-attach { flex: none; }
 .hint { font-size: 11.5px; color: var(--text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* the app's one prominent action: accent fill, --accent-ink label */
 #btn-send {
-  flex: none; min-height: 30px; padding: 4px 18px;
+  flex: none; min-height: 28px; padding: 3px 16px;
   background: var(--accent); border-color: transparent; color: var(--accent-ink);
   font-weight: 600; font-size: 13px;
   border-radius: var(--radius-sm);
@@ -2349,7 +2404,9 @@ body.dropping #input { border-color: var(--accent); border-style: dashed; box-sh
 #resources-overlay { z-index: 75; padding: 2vh 2vw; }
 #resources-dialog {
   display: flex; flex-direction: column; overflow: hidden;
-  width: 100%; max-width: 1500px; height: 100%; max-height: 1100px;
+  /* shrink to the list: at a fixed 100% height two models sat in an empty
+     sheet ~1000 px tall, so the dialog looked broken rather than roomy */
+  width: 100%; max-width: 1500px; height: auto; max-height: min(85vh, 1100px);
   background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
