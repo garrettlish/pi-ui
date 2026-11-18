@@ -1051,7 +1051,30 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 }
 #btn-jump:hover { background: var(--elevated); color: var(--text); }
 
-.item { margin-bottom: 16px; }
+/* Long transcripts skip layout for off-screen items.
+ *
+ * A 17.7 MB session renders 3,260 items / 63,404 nodes / 550,127 px of scroll
+ * height, and laying all of it out costs 372 ms — paid under the reader's
+ * first paint, on every cold open. `content-visibility: auto` lets the engine
+ * skip the style, layout and paint of anything outside the viewport: the same
+ * render then measures 16 ms.
+ *
+ * `contain-intrinsic-size` is what makes the skipped boxes sizeable. Without it
+ * a skipped item collapses to zero height, the scrollbar is a lie (53,306 px
+ * instead of 550,127) and scrollBottom() lands in the wrong place. A fixed
+ * estimate keeps the scrollbar honest enough to navigate; the real height is
+ * substituted as each item is scrolled into view, and the browser keeps the
+ * reader's position anchored across that swap (verified: scrolling to 10/25/
+ * 50/75/90/100% of the transcript holds scrollTop stable throughout).
+ *
+ * A Mermaid diagram is drawn while its item may still be skipped — that is
+ * fine, because Mermaid measures its own scratch node rather than the target,
+ * verified with a diagram 16,658 px below the fold. */
+.item {
+  margin-bottom: 16px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 190px;
+}
 /* user turn: a filled card, because a prompt is an object the reader wrote, not
    flowing prose. Assistant turns carry no container at all: content is the
    interface, and boxing it would put a border between the reader and the text. */
@@ -1292,6 +1315,12 @@ details.item-thinking > summary::-webkit-details-marker { display: none; }
 details.item-thinking > summary::before { content: "▸ "; }
 details.item-thinking[open] > summary::before { content: "▾ "; }
 details.item-thinking[open] > summary { margin-bottom: 4px; }
+/* the body is a div of its own so the streaming handle can target it; the
+   selector must stay in step with renderItem or a streaming block loses its
+   whitespace model */
+details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
+/* the header's expand-all toggle, lit while everything is expanded */
+#btn-thinking-all.on { color: var(--accent-text); background: var(--accent-tint); border-color: var(--accent-tint-border); }
 
 .item-system {
   color: var(--text-2); font-size: 12px;

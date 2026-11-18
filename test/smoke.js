@@ -970,6 +970,63 @@ try {
   check("app.js nests lists by indentation", appJs.includes("function renderList(lines, start)") && appJs.includes("stack.push({ indent: item.indent, tag })"));
   check("app.js keeps an ordered list's start number", appJs.includes('` start='));
 
+  // Long transcripts are the normal case here, not the exception: the largest
+  // saved session is 17.7 MB and renders 3,260 items / 63k nodes. Two costs
+  // dominated opening one, and both are pinned below because neither is visible
+  // in a small session.
+  //
+  // 1. Reconcile used to *insert* a rebuilt node in front of the stale one,
+  //    shifting every following sibling: rebuilding item #8 of 3,260 produced
+  //    3,252 inserts + 6,503 removes (44 ms). Nodes are owned by their items, so
+  //    the correct shape is a positional replaceChild.
+  check(
+    "app.js reconciles the transcript in place",
+    appJs.includes("transcriptEl.replaceChild(want, cur[i])") &&
+      !/cur\.splice\(i, 0, nodes\[i\]\)/.test(appJs)
+  );
+  check("app.js removes only the surplus tail", appJs.includes("while (transcriptEl.children.length > nodes.length)"));
+  // 2. Timestamps are formatted once per item; toLocaleTimeString builds a new
+  //    Intl object per call (124 ms for 5,000) where one cached formatter is
+  //    2.5 ms for the same work.
+  check(
+    "app.js reuses one Intl formatter per timestamp shape",
+    appJs.includes("const TIME_FMT = new Intl.DateTimeFormat") &&
+      appJs.includes("const DATE_FMT = new Intl.DateTimeFormat") &&
+      !appJs.includes("toLocaleTimeString([],")
+  );
+  // 3. Off-screen items must not be laid out, or a cold open pays 372 ms of
+  //    layout for a 550k-pixel transcript. contain-intrinsic-size is not
+  //    optional: without it the skipped boxes collapse and the scrollbar lies.
+  check("style.css skips layout for off-screen items", css.includes("content-visibility: auto"));
+  check("style.css gives a skipped item a sizeable box", css.includes("contain-intrinsic-size: auto 190px"));
+
+  // Thinking is folded by default but readers re-open it constantly, and the
+  // open state used to live only in the DOM: measured, expanding two blocks and
+  // then rebuilding one unrelated item closed one of them, and a full refresh
+  // closed both. The state now has an identity (session file + message
+  // timestamp + block index) and is written before the render that would
+  // discard it — a `toggle` listener alone is too late, because the browser
+  // dispatches it as a queued task.
+  check(
+    "a thinking block has a stable identity",
+    /function thinkingBlockKey\(item, bi\)[\s\S]{0,400}state\.sessionFile[\s\S]{0,200}#\$\{ts\}#\$\{bi\}/.test(appJs)
+  );
+  check(
+    "the open state is captured before the transcript is rebuilt",
+    /function renderTranscript\([\s\S]{0,900}captureThinkingState\(\)/.test(appJs)
+  );
+  check("a thinking block is born in the recorded state", appJs.includes('"data-thinking-key": key || null'));
+  check(
+    "expanding one block is remembered, and survives a rebuild",
+    appJs.includes("function setThinkingOpen(") && appJs.includes("function thinkingIsOpen(")
+  );
+  check(
+    "expand-all repaints in place instead of rebuilding turns",
+    appJs.includes("function applyThinkingExpansion(") && appJs.includes("function toggleAllThinking(")
+  );
+  check("the header offers an expand-all thinking toggle", html.includes('id="btn-thinking-all"'));
+  check("style.css lights the thinking toggle while expanded", css.includes("#btn-thinking-all.on {"));
+
   // An inline triple backtick is not a fence, but it matches the fence *prefix*:
   // "```foo = 1```, so …" fails the closing-fence regex and the paragraph loop
   // skips it for the same reason, so neither branch consumed the line and

@@ -34,13 +34,22 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+/** Cached formatters. `toLocaleTimeString`/`toLocaleString` construct a new
+ *  Intl object on every call, and both are called once per transcript item —
+ *  a 3,260-item session built ~3,450 timestamps during one render (measured:
+ *  124 ms for 5,000 fmtTime calls, 134 ms for fmtDate). One reused
+ *  Intl.DateTimeFormat per shape costs 2.5 ms for the same 5,000. The options
+ *  are constant, so the formatter only has to be built once. */
+const TIME_FMT = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const DATE_FMT = new Intl.DateTimeFormat([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
 function fmtTime(ms) {
   if (!ms) return "";
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return TIME_FMT.format(ms);
 }
 function fmtDate(ms) {
   if (!ms) return "";
-  return new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return DATE_FMT.format(ms);
 }
 function fmtDuration(d) {
   if (d == null) return "";
@@ -91,6 +100,13 @@ const SIDEBAR_TABS = ["recent", "workspaces", "followups"];
 /** which follow-up tag groups the user folded shut in the sidebar tree */
 const FOLLOWUP_TAGS_CLOSED_KEY = "piweb-followup-tags-closed";
 const SIDEBAR_COLLAPSED_KEY = "piweb-sidebar-collapsed";
+/** thinking blocks the reader opened, keyed by sessionFile + block identity, so
+ *  a re-render (a tool result attaching, a replay) does not re-fold what they
+ *  just expanded — see thinkingBlockKey() */
+const THINKING_OPEN_KEY = "piweb-thinking-open";
+const THINKING_OPEN_MAX = 400;
+/** the header toggle: render every thinking block expanded */
+const THINKING_ALL_KEY = "piweb-thinking-expand-all";
 const PROMPT_HISTORY_KEY = "piweb-prompt-history";
 const PROMPT_HISTORY_MAX = 200;
 /** how many leftover processes the composer dock lists before deferring to the
@@ -150,6 +166,13 @@ const state = {
   /** sidebar view: "recent" = flat list across all workspaces, "workspaces" = two-level,
    *  "followups" = saved summaries, grouped by tag */
   sidebarTab: SIDEBAR_TABS.includes(localStorage.getItem(TAB_KEY)) ? localStorage.getItem(TAB_KEY) : "recent",
+  /** true = every thinking block renders expanded (the header toggle). The
+   *  per-block set below is still what decides for a block the reader touched,
+   *  so flipping the global switch never discards their individual choices. */
+  thinkingExpandAll: localStorage.getItem(THINKING_ALL_KEY) === "1",
+  /** per-block explicit choice, keyed by thinkingBlockKey(); a key absent from
+   *  this map follows thinkingExpandAll */
+  thinkingChoice: openThinkingKeys(),
 };
 
 // ---------------------------------------------------------------------------
@@ -2984,6 +3007,123 @@ async function copyTurnAsSlack(item) {
   toast((await copySlackText(text)) ? "copied as Slack text" : "copy failed", "info");
 }
 
+// ---------------------------------------------------------------------------
+// thinking blocks
+//
+// A thinking block used to be a <details> whose open state lived only in the
+// DOM. Any re-render rebuilt the element and folded it again — measured: the
+// reader expands two blocks, one unrelated item goes dirty, and one of the two
+// closes; a full refresh (switching away and back) closes both. Since thinking
+// is the part people re-open to check *why* an answer went the way it did, the
+// state has to survive the render that rebuilds it.
+//
+// Identity is the session file plus the message timestamp plus the block index:
+// the block has no id of its own, but a persisted turn keeps its timestamp
+// across refreshes, and the index disambiguates two blocks in one turn. A live
+// turn has no stable timestamp yet, so it is keyed by nothing and simply starts
+// closed — it is about to be replaced at message_end anyway.
+// ---------------------------------------------------------------------------
+function thinkingBlockKey(item, bi) {
+  const file = state.sessionFile;
+  const ts = item.ts || item.entry?.message?.timestamp || item.meta?.ts;
+  if (!file || !ts) return null;
+  return `${file}#${ts}#${bi}`;
+}
+
+function openThinkingKeys() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(THINKING_OPEN_KEY) || "{}");
+    /** @type {Record<string, boolean>} */
+    const out = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw)) if (k && typeof v === "boolean") out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function persistOpenThinking() {
+  // Bounded: this is a convenience, not a record. A conversation is read
+  // forwards, so the oldest keys are the ones worth dropping.
+  const entries = Object.entries(state.thinkingChoice);
+  const trimmed = entries.slice(Math.max(0, entries.length - THINKING_OPEN_MAX));
+  state.thinkingChoice = Object.fromEntries(trimmed);
+  try {
+    localStorage.setItem(THINKING_OPEN_KEY, JSON.stringify(state.thinkingChoice));
+  } catch {}
+}
+
+/** Record the reader's explicit choice for one block, then persist. */
+function setThinkingOpen(key, open) {
+  if (!key) return;
+  if (state.thinkingChoice[key] === open) return;
+  state.thinkingChoice[key] = open;
+  persistOpenThinking();
+}
+
+/** Harvest any thinking block whose state differs from the current default.
+ *
+ *  `toggle`/click handling is asynchronous, so a block the reader just expanded
+ *  may not have reported itself when the next render starts — and that render is
+ *  exactly what would discard the state. Reading the DOM first closes the window.
+ *
+ *  Only *deviations* are recorded: with expand-all off, an open block is the
+ *  reader's choice; with it on, a closed one is. Anything matching the default
+ *  is left unrecorded, which is what lets the global toggle fold everything back
+ *  and keeps the stored map from filling up with 3,451 copies of the default. */
+function captureThinkingState() {
+  for (const d of transcriptEl.querySelectorAll("details.item-thinking[data-thinking-key]")) {
+    const key = d.dataset.thinkingKey;
+    if (!key) continue;
+    if (d.open === state.thinkingExpandAll) continue;
+    setThinkingOpen(key, d.open);
+  }
+}
+
+/** Is this block expanded? An explicit per-block choice wins either way; with no
+ *  choice recorded, the global toggle decides. */
+function thinkingIsOpen(key) {
+  if (key && typeof state.thinkingChoice[key] === "boolean") return state.thinkingChoice[key];
+  return state.thinkingExpandAll;
+}
+
+/** Repaint every thinking block already on screen, without touching the rest of
+ *  the transcript. Used by the header toggle: the alternative is marking every
+ *  assistant item dirty, which rebuilds 2,600 turns to flip an attribute. */
+function applyThinkingExpansion() {
+  for (const d of transcriptEl.querySelectorAll("details.item-thinking")) {
+    const want = thinkingIsOpen(d.dataset.thinkingKey || null);
+    if (d.open !== want) d.open = want;
+  }
+  syncThinkingToggle();
+}
+
+/** The header button's pressed state, and whether it is worth showing at all:
+ *  a session without thinking gets no control for it. */
+function syncThinkingToggle() {
+  const btn = $("#btn-thinking-all");
+  if (!btn) return;
+  const any = !!transcriptEl.querySelector("details.item-thinking, .item-thinking");
+  btn.classList.toggle("hidden", !any);
+  btn.classList.toggle("on", state.thinkingExpandAll);
+  btn.setAttribute("aria-pressed", String(state.thinkingExpandAll));
+  btn.title = state.thinkingExpandAll ? "Fold thinking blocks" : "Expand thinking blocks";
+  btn.setAttribute(
+    "aria-label",
+    state.thinkingExpandAll ? "Fold thinking blocks" : "Expand thinking blocks"
+  );
+}
+
+function toggleAllThinking() {
+  state.thinkingExpandAll = !state.thinkingExpandAll;
+  try {
+    localStorage.setItem(THINKING_ALL_KEY, state.thinkingExpandAll ? "1" : "0");
+  } catch {}
+  applyThinkingExpansion();
+}
+
 function renderItem(item) {
   switch (item.kind) {
     case "user": {
@@ -3040,9 +3180,22 @@ function renderItem(item) {
           if (b.redacted && !b.thinking) {
             blocks.append(el("div", { class: "item-thinking", text: "[redacted thinking]" }));
           } else {
-            const wrap = el("details", { class: "item-thinking" });
-            const body = el("div", { text: b.thinking || "" });
-            wrap.append(el("summary", { text: "thinking" }), body);
+            const key = thinkingBlockKey(item, bi);
+            const open = thinkingIsOpen(key);
+            const body = el("div", { class: "item-thinking-body", text: b.thinking || "" });
+            const wrap = el("details", { class: "item-thinking", open: open ? "" : null, "data-thinking-key": key || null });
+            // A click on the summary is the *only* way a reader changes this, and
+            // it is also the only change that should be remembered. Listening for
+            // `toggle` instead would be ambiguous: the browser fires it for a
+            // programmatic `open =` too (the header's expand-all), and it does so
+            // as a queued task — after the render that would have needed it.
+            // The click arrives first, so the state is already recorded by then.
+            const summary = el("summary", { text: "thinking" });
+            summary.addEventListener("click", () => {
+              // read `open` on the next task, after the default action ran
+              setTimeout(() => setThinkingOpen(key, wrap.open), 0);
+            });
+            wrap.append(summary, body);
             wrap.style.whiteSpace = "pre-wrap";
             if (item.streaming) item._stream.set(bi, { type: "thinking", node: body, text: textNodeIn(body) });
             blocks.append(wrap);
@@ -3172,6 +3325,9 @@ function renderTranscript({ follow = true } = {}) {
   // applyStreamDelta), and must resume following once they return to the
   // bottom. Measured here, before this render changes the height.
   streamPinned = nearBottom;
+  // Before any node is replaced: a block the reader expanded lives only in the
+  // DOM until its `toggle` runs, and this render is what would throw it away.
+  captureThinkingState();
   const nodes = [];
   for (const item of state.items) {
     if (!item.node || item.dirty) {
@@ -3180,28 +3336,34 @@ function renderTranscript({ follow = true } = {}) {
     }
     nodes.push(item.node);
   }
-  // reconcile children
-  const cur = [...transcriptEl.children];
-  // NOTE: on removal the next child shifts into index i, so i must NOT
-  // advance — otherwise bulk removals (e.g. clearing the transcript for a new
-  // session) only delete every other node and stale messages stay on screen.
-  let i = 0;
-  while (i < cur.length || i < nodes.length) {
-    if (cur[i] === nodes[i]) {
-      i++;
-    } else if (nodes[i]) {
-      transcriptEl.insertBefore(nodes[i], cur[i] || null);
-      cur.splice(i, 0, nodes[i]);
-      i++;
-    } else {
-      cur[i].remove();
-      cur.splice(i, 1);
-    }
+  // Reconcile children against `state.items`.
+  //
+  // The old loop compared positionally and *inserted* a rebuilt node in front of
+  // the stale one, shifting every following sibling. That is fine for an append,
+  // but a single dirty item mid-history then displaced the entire tail: measured
+  // on a 3,260-item session, rebuilding item #8 produced 3,252 inserts and 6,503
+  // removes (44 ms of DOM work) to replace one node. Anything that re-marks an
+  // old item dirty — a replay, a tool result attaching to an earlier call, a
+  // follow-up list arriving late — paid that cost.
+  //
+  // The nodes are owned by the items, so the correct fix is positional replace:
+  // one replaceChild where the node changed, nothing where it did not. Same
+  // render, 0.7 ms and a single mutation record.
+  const cur = transcriptEl.children;
+  for (let i = 0; i < nodes.length; i++) {
+    const want = nodes[i];
+    if (cur[i] === want) continue;
+    if (cur[i]) transcriptEl.replaceChild(want, cur[i]);
+    else transcriptEl.append(want);
   }
+  // Removals run tail-first: an item that left the branch takes its node with
+  // it, and only the surplus beyond the item list is actually surplus.
+  while (transcriptEl.children.length > nodes.length) transcriptEl.lastElementChild.remove();
   // auto-follow the bottom is for streaming content only — a re-render must not
   // fling a user who has scrolled up back to the bottom
   if (follow && nearBottom) scrollBottom();
   updateJumpButton();
+  syncThinkingToggle();
   hydrateMermaid(transcriptEl, { follow: follow && nearBottom });
 }
 
@@ -5872,10 +6034,17 @@ async function refreshCachedView(file) {
           for (const it of built) it.appendedAt = ++liveSeq;
           state.items.push(...built);
         }
+        // Paint before asking for stats. refreshMeta() costs one
+        // get_session_stats round trip, and on a long session that query walks
+        // every entry to rebuild the usage projection (measured 47 ms on the
+        // 17.7 MB transcript). The transcript does not depend on it — it reads
+        // state.items — so awaiting it first left the page on the previous
+        // session's content for that whole window. Header and status are
+        // repainted once the numbers land below.
+        renderTranscript({ follow: false }); // the caller restores this session's offset
         await refreshMeta();
         renderHeader();
         renderStatus();
-        renderTranscript({ follow: false }); // the caller restores this session's offset
         return;
       }
     } catch {
@@ -7460,6 +7629,7 @@ function applyTheme(theme) {
   redrawMermaid();
 }
 wirePicker("#btn-theme", "#theme-menu");
+$("#btn-thinking-all").addEventListener("click", toggleAllThinking);
 document.addEventListener("keydown", (e) => {
   // the theme list is a radio group: arrows move the selection while it is open
   if ($("#theme-menu").classList.contains("hidden")) return;

@@ -52,6 +52,10 @@ SDK instead of bridging RPC is what makes it fast:
 
 - Assistant text, thinking, tool calls, retries and compaction stream in as pi produces them. Links,
   tables, lists and syntax-highlighted code fences render once a message completes.
+- Thinking blocks fold by default, and an expanded one stays expanded: the open state is keyed by
+  session file + message timestamp + block index, so a re-render (a tool result arriving, a replay,
+  switching away and back) no longer re-folds what you just opened. The header's toggle expands or
+  folds every thinking block in the session at once, and it only appears when a session has any.
 - Every tool call is one line in the transcript; clicking it opens a popup with the request
   arguments, live execution updates, the final response and a **Raw JSON** toggle. `edit` calls lead
   with a colored, line-numbered diff.
@@ -182,6 +186,39 @@ placeholder carrying its source, and `hydrateMermaid()` paints it once the nodes
 — at every site that renders Markdown (transcript, follow-up body, subagent output). A syntax error
 is expected while a turn streams, so it leaves the source block plus a note rather than an error
 state. Diagrams are redrawn on a palette switch, since Mermaid bakes colors into the SVG.
+
+### Long transcripts skip what is off screen
+
+The largest saved session here is **17.7 MB**: 6,374 entries, 3,260 transcript items, 63,404 DOM
+nodes, 550,127 px of scroll height. Opening it used to cost **938 ms** end to end and left the tab
+unresponsive while it laid out half a million pixels. Three costs dominated, all measured in Chrome
+against that session:
+
+| what | before | after |
+| --- | --- | --- |
+| layout on first paint | 372 ms | 16 ms |
+| rebuild one mid-history item | 44 ms / 9,755 mutations | 4 ms / 1 mutation |
+| timestamps for one render | 22 ms | 0.5 ms |
+| end-to-end open | 938 ms | 410 ms |
+
+- **`content-visibility: auto` on `.item`** lets the engine skip style, layout and paint for anything
+  outside the viewport. `contain-intrinsic-size: auto 190px` is not optional: without it a skipped
+  item collapses to zero height, the scrollbar lies (53k px instead of 550k) and "jump to latest"
+  lands in the wrong place. Scrolling 10/25/50/75/90/100% of the transcript keeps `scrollTop` stable
+  while the real heights substitute in.
+- **Reconcile replaces in place.** The old loop inserted a rebuilt node *in front of* the stale one,
+  shifting every following sibling, so rebuilding item #8 of 3,260 issued 3,252 inserts and 6,503
+  removes to replace one node. Nodes are owned by their items, so it is now one `replaceChild` where
+  the node changed and nothing where it did not.
+- **One `Intl.DateTimeFormat` per shape**, not one per call. `toLocaleTimeString` builds a new
+  formatter every time and both `fmtTime` and `fmtDate` run once per item — 124 ms per 5,000 calls
+  against 2.5 ms for a reused formatter.
+- **Paint before asking for stats.** `get_session_stats` walks every entry to rebuild the usage
+  projection (47 ms here, synchronously). The transcript does not depend on it, so the cached-view
+  path now renders first and repaints the header when the numbers land.
+
+Deliberately *not* done: gzipping `/api/cmd` responses. The 17.6 MB `get_entries` payload compresses
+to 3.9 MB, but gzipping it costs 234 ms of server CPU — more than the loopback transfer it saves.
 
 ### Images are offloaded, not shipped
 
