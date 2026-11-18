@@ -1665,6 +1665,25 @@ try {
   // arriving; the toggle must re-assert the follow, not look like a reader scroll.
   check("the thinking toggle keeps a following view at the bottom", /function applyThinkingExpansion\(\)[\s\S]{0,600}if \(following\) scrollBottom\(\)/.test(appJs));
 
+  // Jumping to a prompt must land ON it. `scrollIntoView({behavior:"smooth"})`
+  // computes its destination once, so `content-visibility: auto` revealing real
+  // heights mid-animation left the jump short by exactly the height change.
+  check("a prompt jump re-measures instead of trusting a predicted destination", /function scrollToTarget\([\s\S]{0,1400}topOffsetInTranscript\(target\)/.test(appJs));
+  check(
+    "a prompt jump drives the scroll itself, frame by frame",
+    /function scrollToTarget\([\s\S]{0,2200}transcriptEl\.scrollTop \+= [\s\S]{0,200}requestAnimationFrame\(step\)/.test(appJs)
+  );
+  // A reader who scrolls during a jump keeps their position: trusted input ends it.
+  check("real input abandons a jump", /const abandon = \(e\) => \{\s*if \(e\.isTrusted\) abandoned = true;/.test(appJs));
+  check("the jump clears its listeners on every exit", /const release = \(\) => \{[\s\S]{0,200}removeEventListener/.test(appJs));
+  check("a jump is bounded in time", /JUMP_MAX_MS = 2500/.test(appJs));
+  // The jump target must be reconciled into the DOM first; assigning a freshly
+  // built node left it detached and the click did nothing (silently).
+  check(
+    "a prompt jump reconciles the node before scrolling",
+    /function scrollToUserPrompt\(item\)[\s\S]{0,400}renderTranscript\(\{ follow: false \}\)/.test(appJs)
+  );
+
   // The sidebar filter is debounced so a typing burst rebuilds the list once.
   check("the session filter is debounced", /session-filter"\)\.addEventListener\("input", queueSidebarRender\)/.test(appJs));
   check("the badge counts only unacknowledged processes", appJs.includes("n - state.processesAcked"));

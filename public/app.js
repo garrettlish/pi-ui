@@ -3910,13 +3910,14 @@ function renderPromptList() {
 }
 
 function scrollToUserPrompt(item) {
-  // the item's cached node lives in the DOM (renderTranscript reconciles 1:1);
-  // force a sync re-render first if a pending dirty flag would replace it
-  if (item.dirty || !item.node) item.node = renderItem(item);
+  // Reconcile first, like scrollToSummary does: assigning a freshly built node
+  // here left `item.node` outside the DOM, so `isConnected` failed and the click
+  // did nothing at all. renderTranscript replaces the node in place (1:1), which
+  // is what a jump needs when the item is dirty.
+  if (item.dirty || !item.node || !item.node.isConnected) renderTranscript({ follow: false });
   const node = item.node;
   if (!node || !node.isConnected) return;
-  node.scrollIntoView({ block: "start", behavior: "smooth" });
-  flashNode(node);
+  scrollToTarget(node);
 }
 
 /** Jump to the answer text inside a run's summary turn. Scrolling the whole
@@ -3932,8 +3933,72 @@ function scrollToSummary(summary) {
   const blocksEl = box.querySelector(".blocks");
   const blockNode = blocksEl ? blocksEl.children[summary.blockIdx] : null;
   const target = blockNode && blockNode.isConnected ? blockNode : box;
-  target.scrollIntoView({ block: "start", behavior: "smooth" });
+  scrollToTarget(target);
+}
+
+/** Scroll `target` to the top of the transcript, and make it land there.
+ *
+ *  `scrollIntoView({behavior: "smooth"})` was the obvious call and is wrong here
+ *  twice over. It computes its destination once, from the layout that exists when
+ *  it is called, then animates to that fixed offset — but items carry
+ *  `content-visibility: auto`, so an item scrolled past is replaced by its
+ *  `contain-intrinsic-size` estimate until it is laid out, and the transcript's
+ *  height (with every offset below a collapsed item) changes *during* the
+ *  animation. Measured on a real 10-prompt session, the miss equalled the height
+ *  change exactly: 77075 -> 67437 px of scrollHeight landed 490 px above the
+ *  viewport top, a 67425 -> 67294 shrink landed 131 px off, and every jump that
+ *  changed no height landed exactly at 0. And once started, a native smooth
+ *  scroll cannot be abandoned cleanly: a reader who scrolled away mid-jump was
+ *  still carried ~38,000 px to that stale destination.
+ *
+ *  So the scroll is driven here one frame at a time and re-measured every frame,
+ *  against the layout that actually exists. That converges for the reason a fixed
+ *  destination does not: whatever the movement reveals, the next frame is computed
+ *  from it. */
+function scrollToTarget(target) {
   flashNode(target);
+  // A trusted input event from the reader ends the jump; they own the viewport
+  // from then on. This is an input event and not an offset comparison because
+  // this animation moves the transcript itself, so offsets cannot tell an
+  // intentional scroll from the layout shifting under the ease.
+  let abandoned = false;
+  const abandon = (e) => {
+    if (e.isTrusted) abandoned = true;
+  };
+  const inputEvents = ["wheel", "touchstart", "pointerdown", "keydown"];
+  const opts = { passive: true, capture: true };
+  const release = () => {
+    for (const type of inputEvents) transcriptEl.removeEventListener(type, abandon, opts);
+  };
+  for (const type of inputEvents) transcriptEl.addEventListener(type, abandon, opts);
+  const started = Date.now();
+  const step = () => {
+    if (abandoned || !target.isConnected || Date.now() - started > JUMP_MAX_MS) return release();
+    const delta = topOffsetInTranscript(target) - scrollMarginOf(target);
+    if (Math.abs(delta) <= 1) return release();
+    const before = transcriptEl.scrollTop;
+    // Close the last few pixels exactly; ease the rest so it reads as a scroll.
+    transcriptEl.scrollTop += Math.abs(delta) < 8 ? delta : delta * 0.3;
+    // A clamp at either end would otherwise ask to move forever.
+    if (transcriptEl.scrollTop === before) return release();
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+/** Upper bound on one jump. A layout that keeps moving for longer than this is
+ *  not going to converge. */
+const JUMP_MAX_MS = 2500;
+
+/** Offset of `target`'s top edge from the top of the transcript's scrollport. */
+function topOffsetInTranscript(target) {
+  return target.getBoundingClientRect().top - transcriptEl.getBoundingClientRect().top;
+}
+
+/** The scroll-margin the target asks for, as pixels. Honoured so a jump agrees
+ *  with what `scrollIntoView` would have aimed at. */
+function scrollMarginOf(target) {
+  return Number.parseFloat(getComputedStyle(target).scrollMarginTop) || 0;
 }
 
 /** brief highlight drawing the eye to a node that was just jumped to */
