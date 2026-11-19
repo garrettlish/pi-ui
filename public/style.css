@@ -1888,27 +1888,20 @@ details.skill-def[open] > summary { margin-bottom: 6px; }
 .assistant-text h3:first-child,
 .assistant-text h4:first-child,
 .assistant-text h5:first-child { margin-top: 0; }
-/* Reading measure.
+/* Reading measure: full width.
  *
- * The transcript itself keeps no max-width — that decision stands, and the
- * comment above explains why (no dead gutter down either side of the column).
- * What it costs is measurable at the paragraph level: at 1512 px the content
- * column measured 1107 px, which is 132 `ch` — about 82 CJK characters, or ~170
- * latin ones, per line. Comfortable CJK reading is 30–40 characters.
+ * This used to cap flowing prose at `78ch` (~39 CJK characters, the classic
+ * single-column bound) while code, tables and diffs kept the whole column. The
+ * intent was readability, but the result was the opposite of what the cap is
+ * for: at a 1580px window the paragraph measured 664px and left 615px — 39% of
+ * the window — empty on the right, so every prose turn read as a narrow ribbon
+ * with a dead gutter beside it. A cap only helps when the column is wide enough
+ * that a full line is genuinely uncomfortable; on a wide screen it just makes
+ * the text look unfinished.
  *
- * So the cap goes on flowing prose only: paragraphs, list items and quotes. Code
- * blocks, tables, diffs and diagrams keep the full column, which is what makes
- * this different from a max-width on the transcript — the wide things stay wide,
- * and only the thing being read line by line is measured. `78ch` is ~39 CJK
- * characters at this font size, and 78 is the classic upper bound for
- * single-column prose. */
-.assistant-text p,
-.assistant-text li,
-.assistant-text blockquote,
-.assistant-text h2,
-.assistant-text h3,
-.assistant-text h4,
-.assistant-text h5 { max-width: 78ch; }
+ * Prose now uses the full column, like everything else. The transcript keeps no
+ * max-width of its own, so the only inset is the padding — one constant gutter
+ * on both sides, whether the sidebar is open, dragged or collapsed. */
 
 .assistant-text ul, .assistant-text ol { margin: 4px 0 8px; padding-left: 22px; }
 .assistant-text li { margin: 2px 0; }
@@ -3363,14 +3356,5 @@ textarea:focus-visible,
   /* reading size, not chrome size: at 390px the body dropped to 13.5px on a
      ~366px measure, which is 2-3 words a line */
   #transcript { font-size: 14px; line-height: 1.62; }
-  /* the prose measure cap is irrelevant at this width, and the flex row that
-     held the read-outs is what clipped the session title */
-  .assistant-text p,
-  .assistant-text li,
-  .assistant-text blockquote,
-  .assistant-text h2,
-  .assistant-text h3,
-  .assistant-text h4,
-  .assistant-text h5 { max-width: none; }
 }
 
