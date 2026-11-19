@@ -121,10 +121,10 @@ function minimalDocx(escapedText, { corrupt = false } = {}) {
   return Buffer.concat([...locals, directory, end]);
 }
 
-/** The palette token blocks of style.css: `:root` (which doubles as the night
- *  palette and the no-JS fallback) plus one `:root[data-theme="..."]` per
- *  named mood. Parsing the file is deliberate — the test must read the colors
- *  that actually ship, not a copy that can drift.
+/** The palette token blocks of style.css: `:root` (which doubles as the default
+ *  `violet` palette and the no-JS fallback) plus one `:root[data-theme="..."]`
+ *  per named mood. Parsing the file is deliberate — the test must read the
+ *  colors that actually ship, not a copy that can drift.
  *  @returns {Array<[string, Record<string, string>]>} */
 function paletteBlocks(css) {
   const blocks = [];
@@ -135,11 +135,19 @@ function paletteBlocks(css) {
     for (const line of m[2].split("\n")) {
       const t = line.match(/^\s*(--[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\s*;/);
       if (t) tokens[t[1]] = t[2];
+      // the rgba() glows are not colours a test can compare to text, but the
+      // ambient blob's alpha is a contrast ceiling, so it is parsed here too
+      const a = line.match(/^\s*(--ambient-[12])\s*:\s*rgba\(\s*\d+,\s*\d+,\s*\d+,\s*([\d.]+)\s*\)\s*;/);
+      if (a) tokens[a[1]] = Number(a[2]);
+      const g = line.match(/^\s*(--ambient-[12])\s*:\s*rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)\s*;/);
+      if (g) tokens[`${g[1]}-rgb`] = [Number(g[2]), Number(g[3]), Number(g[4])];
     }
-    // only a palette block defines --page: the bare :root above is the night
-    // palette, and the named night block below only restates color-scheme
+    // only a palette block defines --page: the bare :root above is the default
+    // violet palette, and the named violet block below only restates its
+    // color-scheme. The label matters because it is what a failure names, so it
+    // has to be the palette a reader would go and edit.
     if (!tokens["--page"]) continue;
-    blocks.push([m[1] || "night", tokens]);
+    blocks.push([m[1] || "violet", tokens]);
   }
   return blocks;
 }
@@ -209,6 +217,21 @@ function paletteFailures(tokens) {
     if (!tokens[fg] || !tokens[bg]) continue;
     const r = contrastRatio(tokens[fg], tokens[bg]);
     if (r < 4.5) weak.push(`${fg.slice(2)} on ${bg.slice(2)} = ${r.toFixed(2)}`);
+  }
+  // The drifting blob is the brightest thing metadata ever sits on, and it is
+  // why the light moods cannot carry a strong glow: composite it over the page
+  // and check tertiary text against the lit page, not the flat one. A palette
+  // whose glow was turned up for looks fails here rather than shipping a
+  // selected-row timestamp nobody can read.
+  for (const name of ["--ambient-1", "--ambient-2"]) {
+    const rgb = tokens[`${name}-rgb`], alpha = tokens[name];
+    if (!rgb || typeof alpha !== "number" || !tokens["--text-3"]) continue;
+    const lit = "#" + rgb
+      .map((v, i) => Math.round(v * alpha + parseInt(tokens["--page"].slice(1 + i * 2, 3 + i * 2), 16) * (1 - alpha))
+      .toString(16).padStart(2, "0"))
+      .join("");
+    const r = contrastRatio(tokens["--text-3"], lit);
+    if (r < 4.5) weak.push(`text-3 over ${name.slice(2)} = ${r.toFixed(2)}`);
   }
   return weak;
 }

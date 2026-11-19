@@ -1,13 +1,14 @@
 /* ---------------------------------------------------------------------------
    pi-web design tokens.
 
-   The visual language is a dark stage with neon light on it. The page is near
-   black rather than black — #0B0B12, so an ambient glow has something to lift
-   and a card can sit one step above it — and everything that the reader only
-   passes through (toolbar, sidebar, composer, popovers) is glass over that
-   stage. The one thing that is deliberately *not* neon is the reading surface:
-   assistant prose, code blocks and tables sit on opaque near-black fills, so a
-   page of neon chrome never turns into a page of colored text.
+   The visual language is a dark stage with neon light on it. The page is a
+   deep, saturated ground rather than black — violet is #08001C, a near-black
+   with real hue in it — so an ambient glow has something to lift, and a card
+   sits a visible step above it. Everything that the reader only passes through
+   (toolbar, sidebar, composer, popovers) is glass over that stage. The one
+   thing that is deliberately *not* neon is the reading surface: assistant
+   prose, code blocks and tables sit on opaque fills, so a page of neon chrome
+   never turns into a page of colored text.
 
    Ten palettes: five hue families, each in a dark and a light polarity. The
    polarity is not a filter over one set of colors: it flips which side of the
@@ -34,19 +35,29 @@
      --ambient-*   the colored light drifting behind the page
      --inset-line  the 1px highlight along the top of a raised card
 
-   Ambient alpha is a measured ceiling in both polarities, not a taste call.
-   On the dark stages 0.18-0.20 is the most the strongest blob can carry before
-   tertiary metadata drops under 4.5:1; on the light ones a blob is saturated ink
-   over white, so 0.08 is already the ceiling (measured: mist reaches 4.9:1 at
-   0.12 and 4.5:1 at 0.18). That is why the light moods read calmer than the dark
-   ones rather than being the same design dimmed.
+   Ambient alpha is a measured ceiling in both polarities, not a taste call, and
+   the two polarities get very different budgets. On a dark stage the blob is
+   light added to a near-black page, so it can carry 0.42 and still leave
+   tertiary metadata above 4.5:1 at its brightest point. On a light page the same
+   blob is saturated ink over paper, which *darkens* the ground and eats the
+   contrast of dark text: 0.17 is the ceiling there, measured against a page of
+   chroma 0.09. Both ceilings are fitted by the test, not by eye.
+
+   Separations are part of the same contract. A card that clears the page by
+   1.05:1 is a card nobody can see, which is how the first cut of these palettes
+   read: washed out at every size. The dark stages now separate the page, the
+   card and the elevated fill by 1.12 / 1.24, border lines reach 2.0-2.2:1, and
+   the light pages keep a deeper ground (1.5-1.6:1 under the card) so the card
+   still reads as paper laid on paper.
 
    Contrast is a build constraint, not a review note, and it is enforced by
    test/smoke.js rather than trusted to this comment. Every text pair clears
    4.5:1 against the page, the card surface, the elevated fill, the table band
    *and* the selected-row tint — 35 pairs per palette, in all ten moods. The
    accent is also printed on those same fills as text (`.turn-action.primary`),
-   so it is fitted against the tint too.
+   so it is fitted against the tint too. Tertiary metadata is additionally fitted
+   against the ambient blob at its brightest, which is the pair that actually
+   decides the light budget.
 
    Neon is never the only carrier of meaning: status always has a word beside
    it. A family whose accent is green moves its success to teal or sky for the
@@ -57,59 +68,59 @@
 --------------------------------------------------------------------------- */
 :root {
   /* surfaces: page (the stage) < surface (cards) < elevated (fills) */
-  --page: #0b0b12;
-  --surface: #12121c;
-  --elevated: #1a1a28;
-  --code: #08080e;
+  --page: #08001c;
+  --surface: #1b0c36;
+  --elevated: #2e1f4f;
+  --code: #010009;
   /* a table header band: one step away from a card body, because the band has
      to read as a band. */
-  --table-head: #22223a;
+  --table-head: #3d2d63;
   /* the floating functional layer: toolbar, sidebar, composer, popovers */
-  --glass: rgba(18, 18, 28, 0.72);
-  --border: #2a2a40;
-  --border-strong: #43436a;
+  --glass: rgba(27, 12, 54, 0.78);
+  --border: #4a3874;
+  --border-strong: #785abd;
 
   /* text: primary, secondary (labels), tertiary (metadata) */
-  --text: #f5f5fa;
-  --text-2: #b6b6cc;
-  --text-3: #9797b2;
+  --text: #f9f8ff;
+  --text-2: #cac5dd;
+  --text-3: #bbb5cf;
 
   /* one accent: the primary action, selection and focus. A light hue with dark
      ink on top, so a filled control reads as light on a near-black page. */
-  --accent: #9466f8;
-  --accent-hover: #a78bfa;
-  --accent-ink: #0a0714;            /* label on an accent fill */
-  --accent-text: #c4b5fd;           /* accent as text on a surface */
-  --accent-tint: #1e1236;           /* selected row, soft badge, chip */
-  --accent-tint-border: #5b3ba8;
-  --focus: #b9a2ff;
+  --accent: #b194fd;
+  --accent-hover: #c0abfe;
+  --accent-ink: #120826;            /* label on an accent fill */
+  --accent-text: #b194fd;           /* accent as text on a surface */
+  --accent-tint: #482285;           /* selected row, soft badge, chip */
+  --accent-tint-border: #905df3;
+  --focus: #dad0fe;
 
   /* the palette's light sources: a,b are the primary gradient, c is the second
      light (the far blob, the second stop of a two-light gradient) */
-  --grad-a: #8b5cf6;
-  --grad-b: #a78bfa;
-  --grad-c: #ec4899;
+  --grad-a: #9a6afd;
+  --grad-b: #af92fd;
+  --grad-c: #fd14a9;
   /* the empty-state heading fades from ink to this: one step off the primary ink,
      not the metadata grey, so the last line stays a heading */
-  --te-title-2: #c9c9dd;
+  --te-title-2: #d6d0ec;
   /* rgba() forms, for shadows and glows that cannot take a gradient. --glow is
      the shadow color (a card on a near-black page needs a strong one); --ambient
      is the light itself, and is deliberately much weaker. */
-  --glow: rgba(148, 102, 248, 0.38);
-  --glow-2: rgba(236, 72, 153, 0.26);
-  --ambient-1: rgba(148, 102, 248, 0.20);
-  --ambient-2: rgba(236, 72, 153, 0.14);
+  --glow: rgba(177, 148, 253, 0.62);
+  --glow-2: rgba(253, 20, 169, 0.46);
+  --ambient-1: rgba(177, 148, 253, 0.42);
+  --ambient-2: rgba(253, 20, 169, 0.3);
   /* the highlight along the top edge of a raised card: white on a dark stage,
      ink on a light one */
-  --inset-line: rgba(255, 255, 255, 0.05);
+  --inset-line: rgba(255, 255, 255, 0.08);
 
   /* status: always paired with a word, never color alone */
-  --success: #5ae9b0;
-  --success-tint: #0f362a;
-  --warning: #f7c245;
-  --warning-tint: #3a2e14;
-  --danger: #ff7a8a;
-  --danger-tint: #3e1a22;
+  --success: #1bf4bb;
+  --success-tint: #003a2a;
+  --warning: #fecd5d;
+  --warning-tint: #3f2d00;
+  --danger: #fe7e7d;
+  --danger-tint: #5a1116;
 
   /* depth: an offset plus a soft blur, tinted toward the palette rather than
      pure black so a shadow reads as light falling off, not as a hole */
@@ -118,9 +129,9 @@
   --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
   /* the colored one: used on the surfaces that float above the stage */
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: rgba(4, 4, 10, 0.72);
+  --overlay: rgba(4, 0, 18, 0.76);
 
-  --scrollbar: #4d4d70;
+  --scrollbar: #7359b1;
 
   /* type: a geometric display face for headings and chrome, a neutral one for
      prose. Inter carries the reading surface because it is drawn for screens at
@@ -153,104 +164,107 @@
 }
 
 /* ---------------------------------------------------------------------------
-   The four palettes.
+   The five dark stages.
 --------------------------------------------------------------------------- */
 
-/* magenta: hot-pink neon on a plum-tinged black. The page keeps a trace of the
-   accent's hue, so a pink glow sits on a surface it belongs to. */
+/* magenta: hot-pink neon on a plum-tinged black. The page keeps the accent's
+   hue at full saturation budget, so a pink glow sits on a surface it belongs
+   to rather than on neutral grey. */
 :root[data-theme="magenta"] {
-  --page: #0c0a11;
-  --surface: #151020;
-  --elevated: #1e172b;
-  --code: #09070d;
-  --table-head: #2a1f3b;
-  --glass: rgba(21, 16, 32, 0.72);
-  --border: #382a49;
-  --border-strong: #5c4470;
+  --page: #150006;
+  --surface: #300219;
+  --elevated: #48132c;
+  --code: #050001;
+  --table-head: #5c213c;
+  --glass: rgba(48, 2, 25, 0.78);
+  --border: #6c2a48;
+  --border-strong: #b04374;
 
-  --text: #fbf5f9;
-  --text-2: #cbb8c8;
-  --text-3: #ab97a9;
+  --text: #fff7f9;
+  --text-2: #dcc0ca;
+  --text-3: #cfb2bc;
 
-  --accent: #ec4899;
-  --accent-hover: #f472b6;
-  --accent-ink: #16040c;
-  --accent-text: #f9a8d4;
-  --accent-tint: #2b0f22;
-  --accent-tint-border: #8d2b60;
-  --focus: #f9a8d4;
+  --accent: #fe75b0;
+  --accent-hover: #fe97c0;
+  --accent-ink: #220211;
+  --accent-text: #fe75b0;
+  --accent-tint: #740042;
+  --accent-tint-border: #dd348a;
+  --focus: #fec5da;
 
-  --grad-a: #ec4899;
-  --grad-b: #f472b6;
-  --grad-c: #a78bfa;
-  --te-title-2: #d8c4d3;
-  --glow: rgba(236, 72, 153, 0.38);
-  --glow-2: rgba(167, 139, 250, 0.26);
-  --ambient-1: rgba(236, 72, 153, 0.20);
-  --ambient-2: rgba(167, 139, 250, 0.13);
+  --grad-a: #fc1097;
+  --grad-b: #fe71af;
+  --grad-c: #8a7cfd;
+  --te-title-2: #ebcad5;
+  --glow: rgba(254, 117, 176, 0.62);
+  --glow-2: rgba(138, 124, 253, 0.46);
+  --ambient-1: rgba(254, 117, 176, 0.42);
+  --ambient-2: rgba(138, 124, 253, 0.3);
+  --inset-line: rgba(255, 255, 255, 0.08);
 
-  --success: #5ae9c0;
-  --success-tint: #0f362e;
-  --warning: #f7c245;
-  --warning-tint: #3a2e14;
-  --danger: #ff7a8a;
-  --danger-tint: #3e1a22;
+  --success: #1bf4bb;
+  --success-tint: #003a2a;
+  --warning: #fecd5d;
+  --warning-tint: #3f2d00;
+  --danger: #fe7c7b;
+  --danger-tint: #5a1116;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.55);
   --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: rgba(8, 4, 12, 0.74);
-  --scrollbar: #6b5079;
+  --overlay: rgba(13, 0, 3, 0.76);
+  --scrollbar: #a54570;
   color-scheme: dark;
 }
 
 /* cyan: ice blue on a blue-black. The coolest of the four; the accent is the
    one light hue here that reads almost white at text sizes. */
 :root[data-theme="cyan"] {
-  --page: #080f16;
-  --surface: #0f1a24;
-  --elevated: #172634;
-  --code: #060b10;
-  --table-head: #1c3142;
-  --glass: rgba(15, 26, 36, 0.72);
-  --border: #24394a;
-  --border-strong: #3d5f75;
+  --page: #00070d;
+  --surface: #001b22;
+  --elevated: #00303a;
+  --code: #000105;
+  --table-head: #00414d;
+  --glass: rgba(0, 27, 34, 0.78);
+  --border: #004e5c;
+  --border-strong: #077e93;
 
-  --text: #f2fafb;
-  --text-2: #abc6d0;
-  --text-3: #8eabb6;
+  --text: #effcff;
+  --text-2: #b1cfd7;
+  --text-3: #b4d5dd;
 
-  --accent: #06b6d4;
-  --accent-hover: #22d3ee;
-  --accent-ink: #04131a;
-  --accent-text: #67e8f9;
-  --accent-tint: #0a2733;
-  --accent-tint-border: #1c6e85;
-  --focus: #67e8f9;
+  --accent: #18dbfd;
+  --accent-hover: #84e7fe;
+  --accent-ink: #001319;
+  --accent-text: #18dbfd;
+  --accent-tint: #004754;
+  --accent-tint-border: #0a93ab;
+  --focus: #8ae8fe;
 
-  --grad-a: #06b6d4;
-  --grad-b: #22d3ee;
-  --grad-c: #7c3aed;
-  --te-title-2: #b9d2dc;
-  --glow: rgba(6, 182, 212, 0.36);
-  --glow-2: rgba(124, 58, 237, 0.24);
-  --ambient-1: rgba(6, 182, 212, 0.20);
-  --ambient-2: rgba(124, 58, 237, 0.13);
+  --grad-a: #18dbfd;
+  --grad-b: #18dbfd;
+  --grad-c: #8a7cfd;
+  --te-title-2: #b7dce5;
+  --glow: rgba(24, 219, 253, 0.62);
+  --glow-2: rgba(138, 124, 253, 0.46);
+  --ambient-1: rgba(24, 219, 253, 0.42);
+  --ambient-2: rgba(138, 124, 253, 0.3);
+  --inset-line: rgba(255, 255, 255, 0.08);
 
-  --success: #5ae9b0;
-  --success-tint: #0f362a;
-  --warning: #f7c245;
-  --warning-tint: #3a2e14;
-  --danger: #ff7a8a;
-  --danger-tint: #3e1a22;
+  --success: #1bf4bb;
+  --success-tint: #003a2a;
+  --warning: #fecd5d;
+  --warning-tint: #3f2d00;
+  --danger: #fe8d8a;
+  --danger-tint: #5a1116;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.55);
   --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: rgba(2, 8, 12, 0.74);
-  --scrollbar: #40606f;
+  --overlay: rgba(0, 4, 9, 0.76);
+  --scrollbar: #06798d;
   color-scheme: dark;
 }
 
@@ -259,51 +273,52 @@
    brown-black bias, not a blue one, so an amber glow sits on a surface it
    belongs to. */
 :root[data-theme="ember"] {
-  --page: #0f0b06;
-  --surface: #17110a;
-  --elevated: #201810;
-  --code: #0a0704;
-  --table-head: #2c2013;
-  --glass: rgba(23, 17, 10, 0.72);
-  --border: #3a2c1c;
-  --border-strong: #5e4730;
+  --page: #140000;
+  --surface: #261100;
+  --elevated: #3f2300;
+  --code: #040000;
+  --table-head: #533000;
+  --glass: rgba(38, 17, 0, 0.78);
+  --border: #633b00;
+  --border-strong: #9c6104;
 
-  --text: #fbf6ef;
-  --text-2: #d2c0a8;
-  --text-3: #b3a18a;
+  --text: #fff8f0;
+  --text-2: #d8c5b2;
+  --text-3: #d3bfaa;
 
-  --accent: #f5a524;
-  --accent-hover: #fbbf24;
-  --accent-ink: #1a1004;
-  --accent-text: #fcd34d;
-  --accent-tint: #2e1e0a;
-  --accent-tint-border: #8a5f14;
-  --focus: #fcd34d;
+  --accent: #fc9f11;
+  --accent-hover: #feb96b;
+  --accent-ink: #1d0a00;
+  --accent-text: #fc9f11;
+  --accent-tint: #5a3500;
+  --accent-tint-border: #b67107;
+  --focus: #fecd99;
 
-  --grad-a: #f59e0b;
-  --grad-b: #fbbf24;
+  --grad-a: #fc9f11;
+  --grad-b: #fc9f11;
   /* the second light crosses to magenta, which is what keeps an amber page from
      being one hue from end to end */
-  --grad-c: #ec4899;
-  --te-title-2: #e8d3b4;
-  --glow: rgba(245, 165, 36, 0.34);
-  --glow-2: rgba(236, 72, 153, 0.22);
-  --ambient-1: rgba(245, 158, 11, 0.18);
-  --ambient-2: rgba(236, 72, 153, 0.12);
+  --grad-c: #fd10b9;
+  --te-title-2: #e6d0b9;
+  --glow: rgba(252, 159, 17, 0.62);
+  --glow-2: rgba(253, 16, 185, 0.46);
+  --ambient-1: rgba(252, 159, 17, 0.42);
+  --ambient-2: rgba(253, 16, 185, 0.3);
+  --inset-line: rgba(255, 255, 255, 0.08);
 
-  --success: #5ae9b0;
-  --success-tint: #0f3629;
-  --warning: #f7c245;
-  --warning-tint: #3a2e14;
-  --danger: #ff7a8a;
-  --danger-tint: #3e1a22;
+  --success: #1bf4bb;
+  --success-tint: #003a2a;
+  --warning: #fecd5d;
+  --warning-tint: #3f2d00;
+  --danger: #fe8684;
+  --danger-tint: #5a1116;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.55);
   --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: rgba(10, 6, 2, 0.74);
-  --scrollbar: #6b5636;
+  --overlay: rgba(12, 0, 0, 0.76);
+  --scrollbar: #975d04;
   color-scheme: dark;
 }
 
@@ -311,219 +326,218 @@
    failure cannot disappear against a page that is already green — the same rule
    crimson used to follow, and the reason status has a word beside it. */
 :root[data-theme="jade"] {
-  --page: #06100c;
-  --surface: #0b1a14;
-  --elevated: #12261d;
-  --code: #040b08;
-  --table-head: #17342a;
-  --glass: rgba(11, 26, 20, 0.72);
-  --border: #1f3d2f;
-  --border-strong: #356451;
+  --page: #000902;
+  --surface: #001e10;
+  --elevated: #003420;
+  --code: #000200;
+  --table-head: #00452d;
+  --glass: rgba(0, 30, 16, 0.78);
+  --border: #005337;
+  --border-strong: #07855a;
 
-  --text: #f0fbf5;
-  --text-2: #a8c9b8;
-  --text-3: #8baf9d;
+  --text: #f1fcf6;
+  --text-2: #b6d0c2;
+  --text-3: #c9e5d5;
 
-  --accent: #3ddc97;
-  --accent-hover: #6ee7b7;
-  --accent-ink: #04140d;
-  --accent-text: #86efac;
-  --accent-tint: #0b3326;
-  --accent-tint-border: #1c7a57;
-  --focus: #86efac;
+  --accent: #1cfdb0;
+  --accent-hover: #acffd6;
+  --accent-ink: #001509;
+  --accent-text: #1cfdb0;
+  --accent-tint: #004b31;
+  --accent-tint-border: #0b9b6a;
+  --focus: #1cfdb0;
 
-  --grad-a: #10b981;
-  --grad-b: #34d399;
-  --grad-c: #22d3ee;
-  --te-title-2: #b6d8c7;
-  --glow: rgba(61, 220, 151, 0.32);
-  --glow-2: rgba(34, 211, 238, 0.22);
-  --ambient-1: rgba(61, 220, 151, 0.18);
-  --ambient-2: rgba(34, 211, 238, 0.12);
+  --grad-a: #1cfdb0;
+  --grad-b: #1cfdb0;
+  --grad-c: #15cbf5;
+  --te-title-2: #beddcc;
+  --glow: rgba(28, 253, 176, 0.62);
+  --glow-2: rgba(21, 203, 245, 0.46);
+  --ambient-1: rgba(28, 253, 176, 0.42);
+  --ambient-2: rgba(21, 203, 245, 0.3);
+  --inset-line: rgba(255, 255, 255, 0.08);
 
   /* success moves to sky: emerald-on-emerald would carry no meaning */
-  --success: #7dd3fc;
-  --success-tint: #0c3040;
-  --warning: #f7c245;
-  --warning-tint: #3a2e14;
-  --danger: #ff8a7a;
-  --danger-tint: #3e1a18;
+  --success: #81e1fe;
+  --success-tint: #003744;
+  --warning: #fecd5d;
+  --warning-tint: #3f2d00;
+  --danger: #fe8e8b;
+  --danger-tint: #5a1116;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.55);
   --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: rgba(2, 8, 5, 0.74);
-  --scrollbar: #3f6b56;
+  --overlay: rgba(0, 6, 1, 0.76);
+  --scrollbar: #068057;
   color-scheme: dark;
 }
 
 /* ---------------------------------------------------------------------------
-   The four light palettes.
+   The five light palettes.
 
    These are not the dark moods dimmed. The polarity flips, so the accent is a
    deep saturated ink instead of a bright one: --accent is printed as text on
    cards and reads on a selected row, and a bright hue that looks right in a
-   button would fail at 12px on white. --accent-ink is therefore white here, and
-   the primary button is a deep two-stop gradient carrying white — measured
-   5.9:1 at its lightest stop, not just at the dark one.
+   button would fail at 12px on colored paper. --accent-ink is therefore white
+   here, and the primary button is a deep two-stop gradient carrying white.
 
-   The ambient light is much weaker in this polarity (0.08/0.05 against the dark
-   moods' 0.18/0.12): a saturated blob over a near-white page darkens the page,
-   which eats the contrast of dark text rather than adding light behind it. At
-   0.10 the mist page still clears 5.0:1 for tertiary metadata; by 0.18 it is
-   under 4.5:1. The light moods are consequently calmer than the dark ones —
-   that is the honest result of the constraint, not a failure of nerve.
+   The page is paper with pigment in it, not near-white: at L 0.85 a ground can
+   carry chroma around 0.09 and still hold metadata at 4.6:1, and that was
+   measured, not guessed. Above 0.88 the ground can only carry 0.075 and the
+   mood goes pale; below 0.82 tertiary text fails outright. The ambient light is
+   correspondingly weak (0.17/0.11 against the dark stages' 0.42/0.30), because
+   a saturated blob over paper darkens the page instead of lighting it.
 --------------------------------------------------------------------------- */
 
 /* lilac: violet ink on a lavender page. The light counterpart of `violet`, and
    the default light mood. */
 :root[data-theme="lilac"] {
-  --page: #ece9fe;
-  --surface: #ffffff;
-  --elevated: #f6f4ff;
-  --code: #f8f7fd;
-  --table-head: #ddd6fe;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #d5cdf2;
-  --border-strong: #9c86d8;
+  --page: #d1c4fe;
+  --surface: #fdfdff;
+  --elevated: #eee9ff;
+  --code: #e9e4ff;
+  --table-head: #cec0fe;
+  --glass: rgba(253, 253, 255, 0.8);
+  --border: #a391d9;
+  --border-strong: #7956c4;
 
-  --text: #1b1233;
-  --text-2: #453a63;
-  --text-3: #5b4e7d;
+  --text: #18102a;
+  --text-2: #443d5a;
+  --text-3: #46405c;
 
-  --accent: #6d28d9;
-  --accent-hover: #7c3aed;
+  --accent: #6f08d9;
+  --accent-hover: #5d04b8;
   --accent-ink: #ffffff;
-  --accent-text: #6d28d9;
-  --accent-tint: #ede9fe;
-  --accent-tint-border: #b9a3ea;
-  --focus: #6d28d9;
+  --accent-text: #6f08d9;
+  --accent-tint: #e1dafe;
+  --accent-tint-border: #9a77ec;
+  --focus: #6f08d9;
 
-  --grad-a: #7c3aed;
-  --grad-b: #9333ea;
-  --grad-c: #db2777;
-  --te-title-2: #3d3160;
-  --glow: rgba(109, 40, 217, 0.22);
-  --glow-2: rgba(219, 39, 119, 0.16);
-  --ambient-1: rgba(124, 58, 237, 0.08);
-  --ambient-2: rgba(219, 39, 119, 0.05);
-  --inset-line: rgba(255, 255, 255, 0.9);
+  --grad-a: #790aeb;
+  --grad-b: #7108dc;
+  --grad-c: #a6056d;
+  --te-title-2: #40355e;
+  --glow: rgba(111, 8, 217, 0.36);
+  --glow-2: rgba(166, 5, 109, 0.28);
+  --ambient-1: rgba(111, 8, 217, 0.17);
+  --ambient-2: rgba(166, 5, 109, 0.11);
+  --inset-line: rgba(255, 255, 255, 0.95);
 
-  --success: #046a4a;
-  --success-tint: #d9f7ec;
-  --warning: #8a5300;
-  --warning-tint: #fdead0;
-  --danger: #b4232a;
-  --danger-tint: #fce3e4;
+  --success: #025f3d;
+  --success-tint: #c1f4d8;
+  --warning: #754a01;
+  --warning-tint: #ffe1bd;
+  --danger: #a60424;
+  --danger-tint: #ffdddb;
 
   --shadow-sm: 0 1px 2px hsl(258 40% 30% / 0.08);
   --shadow-md: 0 4px 16px hsl(258 40% 30% / 0.12);
   --shadow-lg: 0 18px 48px hsl(258 40% 30% / 0.2);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: hsl(258 40% 20% / 0.32);
-  --scrollbar: #b4a6dd;
+  --overlay: rgba(76, 59, 117, 0.34);
+  --scrollbar: #917dca;
   color-scheme: light;
 }
 
 /* rose: magenta ink on a blush page. The light counterpart of `magenta`. */
 :root[data-theme="rose"] {
-  --page: #fce7f3;
-  --surface: #ffffff;
-  --elevated: #fef2f8;
-  --code: #fdf6fa;
-  --table-head: #fbcfe8;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #f3c3dd;
-  --border-strong: #d97cad;
+  --page: #fdb6d1;
+  --surface: #fffdfd;
+  --elevated: #ffe5ee;
+  --code: #ffdee9;
+  --table-head: #feb0ce;
+  --glass: rgba(255, 253, 253, 0.8);
+  --border: #d282a2;
+  --border-strong: #b53c75;
 
-  --text: #2b1020;
-  --text-2: #5c3550;
-  --text-3: #6f4a63;
+  --text: #270b17;
+  --text-2: #583744;
+  --text-3: #5a3a47;
 
-  --accent: #a4185c;
-  --accent-hover: #be125f;
+  --accent: #9f045d;
+  --accent-hover: #86024d;
   --accent-ink: #ffffff;
-  --accent-text: #a4185c;
-  --accent-tint: #fce7f3;
-  --accent-tint-border: #e58bb8;
-  --focus: #a4185c;
+  --accent-text: #9f045d;
+  --accent-tint: #ffd1e1;
+  --accent-tint-border: #dd5d96;
+  --focus: #9f045d;
 
-  --grad-a: #be125f;
-  --grad-b: #9d174d;
-  --grad-c: #7c3aed;
-  --te-title-2: #6d4459;
-  --glow: rgba(164, 24, 92, 0.22);
-  --glow-2: rgba(124, 58, 237, 0.16);
-  --ambient-1: rgba(190, 18, 95, 0.07);
-  --ambient-2: rgba(124, 58, 237, 0.05);
-  --inset-line: rgba(255, 255, 255, 0.9);
+  --grad-a: #ad0566;
+  --grad-b: #a1045f;
+  --grad-c: #5a09e4;
+  --te-title-2: #592c3f;
+  --glow: rgba(159, 4, 93, 0.36);
+  --glow-2: rgba(90, 9, 228, 0.28);
+  --ambient-1: rgba(159, 4, 93, 0.17);
+  --ambient-2: rgba(90, 9, 228, 0.11);
+  --inset-line: rgba(255, 255, 255, 0.95);
 
-  --success: #046a4a;
-  --success-tint: #d9f7ec;
-  --warning: #8a5300;
-  --warning-tint: #fdead0;
-  --danger: #b4232a;
-  --danger-tint: #fce3e4;
+  --success: #025e3c;
+  --success-tint: #c1f4d8;
+  --warning: #724901;
+  --warning-tint: #ffe1bd;
+  --danger: #a60424;
+  --danger-tint: #ffdddb;
 
   --shadow-sm: 0 1px 2px hsl(330 40% 30% / 0.08);
   --shadow-md: 0 4px 16px hsl(330 40% 30% / 0.12);
   --shadow-lg: 0 18px 48px hsl(330 40% 30% / 0.2);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: hsl(330 40% 20% / 0.32);
-  --scrollbar: #d79cbb;
+  --overlay: rgba(110, 47, 74, 0.34);
+  --scrollbar: #c26d90;
   color-scheme: light;
 }
 
 /* mist: cobalt ink on a pale azure page. The light counterpart of `cyan`. */
 :root[data-theme="mist"] {
-  --page: #e3f2fd;
-  --surface: #ffffff;
-  --elevated: #f0f9ff;
-  --code: #f6fbfe;
-  --table-head: #bae6fd;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #bcdcf0;
-  --border-strong: #6fa9c9;
+  --page: #96d7fe;
+  --surface: #fcfeff;
+  --elevated: #daf1ff;
+  --code: #d0edff;
+  --table-head: #8ed5fe;
+  --glass: rgba(252, 254, 255, 0.8);
+  --border: #55a9d6;
+  --border-strong: #0679a9;
 
-  --text: #08202e;
-  --text-2: #2f4c5e;
-  --text-3: #3f6175;
+  --text: #001928;
+  --text-2: #264759;
+  --text-3: #2d4d5f;
 
-  --accent: #0369a1;
-  --accent-hover: #075985;
+  --accent: #025b80;
+  --accent-hover: #004b6b;
   --accent-ink: #ffffff;
-  --accent-text: #0369a1;
-  --accent-tint: #e0f2fe;
-  --accent-tint-border: #7cc3e3;
-  --focus: #0369a1;
+  --accent-text: #025b80;
+  --accent-tint: #bee6fe;
+  --accent-tint-border: #0d9cd8;
+  --focus: #025b80;
 
-  /* #0891b2 is the brighter cyan and fails white at 3.7:1; #0e7490 is the same
-     hue one step down and clears it at 5.4:1, so the ramp keeps its character
-     without putting white text on a hue that cannot hold it */
-  --grad-a: #0e7490;
-  --grad-b: #0369a1;
-  --grad-c: #7c3aed;
-  --te-title-2: #20455c;
-  --glow: rgba(3, 105, 161, 0.24);
-  --glow-2: rgba(124, 58, 237, 0.16);
-  --ambient-1: rgba(14, 116, 144, 0.08);
-  --ambient-2: rgba(124, 58, 237, 0.05);
-  --inset-line: rgba(255, 255, 255, 0.9);
+  /* #0891b2 is the brighter cyan and fails white at 3.7:1; the stop is fitted
+     by the palette generator to the deepest value that holds a white label */
+  --grad-a: #03648c;
+  --grad-b: #025d82;
+  --grad-c: #6e06c1;
+  --te-title-2: #0b425c;
+  --glow: rgba(2, 91, 128, 0.36);
+  --glow-2: rgba(110, 6, 193, 0.28);
+  --ambient-1: rgba(2, 91, 128, 0.17);
+  --ambient-2: rgba(110, 6, 193, 0.11);
+  --inset-line: rgba(255, 255, 255, 0.95);
 
-  --success: #046a4a;
-  --success-tint: #d9f7ec;
-  --warning: #8a5300;
-  --warning-tint: #fdead0;
-  --danger: #b4232a;
-  --danger-tint: #fce3e4;
+  --success: #02623f;
+  --success-tint: #c1f4d8;
+  --warning: #784c01;
+  --warning-tint: #ffe1bd;
+  --danger: #a60424;
+  --danger-tint: #ffdddb;
 
   --shadow-sm: 0 1px 2px hsl(205 40% 30% / 0.08);
   --shadow-md: 0 4px 16px hsl(205 40% 30% / 0.12);
   --shadow-lg: 0 18px 48px hsl(205 40% 30% / 0.2);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: hsl(205 40% 18% / 0.32);
-  --scrollbar: #93bcd4;
+  --overlay: rgba(0, 78, 110, 0.34);
+  --scrollbar: #3596c8;
   color-scheme: light;
 }
 
@@ -532,50 +546,50 @@
    not three blues in a row. Its second gradient stop crosses to magenta, which
    is what keeps the primary button from being orange-on-orange. */
 :root[data-theme="bloom"] {
-  --page: #fdf4e7;
-  --surface: #ffffff;
-  --elevated: #fffaf2;
-  --code: #fdf8f0;
-  --table-head: #fbe3c0;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #f0dcc0;
-  --border-strong: #cb9f6c;
+  --page: #febc9f;
+  --surface: #fffdfc;
+  --elevated: #ffe7dd;
+  --code: #ffe1d4;
+  --table-head: #feb898;
+  --glass: rgba(255, 253, 252, 0.8);
+  --border: #d58966;
+  --border-strong: #b54b04;
 
-  --text: #2a1a0c;
-  --text-2: #5a4430;
-  --text-3: #6d5540;
+  --text: #280d02;
+  --text-2: #593a2c;
+  --text-3: #5e3f32;
 
-  --accent: #9a3412;
-  --accent-hover: #b5471b;
+  --accent: #8e3801;
+  --accent-hover: #772e00;
   --accent-ink: #ffffff;
-  --accent-text: #9a3412;
-  --accent-tint: #fdeee0;
-  --accent-tint-border: #dda37a;
-  --focus: #9a3412;
+  --accent-text: #8e3801;
+  --accent-tint: #ffd6c4;
+  --accent-tint-border: #e26725;
+  --focus: #8e3801;
 
-  --grad-a: #b5471b;
-  --grad-b: #9a3412;
-  --grad-c: #a21caf;
-  --te-title-2: #63482f;
-  --glow: rgba(154, 52, 18, 0.22);
-  --glow-2: rgba(162, 28, 175, 0.16);
-  --ambient-1: rgba(181, 71, 27, 0.08);
-  --ambient-2: rgba(162, 28, 175, 0.05);
-  --inset-line: rgba(255, 255, 255, 0.9);
+  --grad-a: #9b3e02;
+  --grad-b: #903901;
+  --grad-c: #8d0497;
+  --te-title-2: #5b301c;
+  --glow: rgba(142, 56, 1, 0.36);
+  --glow-2: rgba(141, 4, 151, 0.28);
+  --ambient-1: rgba(142, 56, 1, 0.17);
+  --ambient-2: rgba(141, 4, 151, 0.11);
+  --inset-line: rgba(255, 255, 255, 0.95);
 
-  --success: #046a4a;
-  --success-tint: #d9f7ec;
-  --warning: #8a5300;
-  --warning-tint: #fdead0;
-  --danger: #b4232a;
-  --danger-tint: #fce3e4;
+  --success: #025f3d;
+  --success-tint: #c1f4d8;
+  --warning: #744a01;
+  --warning-tint: #ffe1bd;
+  --danger: #a60424;
+  --danger-tint: #ffdddb;
 
   --shadow-sm: 0 1px 2px hsl(30 40% 30% / 0.08);
   --shadow-md: 0 4px 16px hsl(30 40% 30% / 0.12);
   --shadow-lg: 0 18px 48px hsl(30 40% 30% / 0.2);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: hsl(30 40% 20% / 0.32);
-  --scrollbar: #dcc0a0;
+  --overlay: rgba(112, 52, 22, 0.34);
+  --scrollbar: #c5744e;
   color-scheme: light;
 }
 
@@ -583,52 +597,53 @@
    the fifth light hue — the set was four cool blues and pinks, and a green is
    the one that makes the picker a palette rather than a family. */
 :root[data-theme="sage"] {
-  --page: #e8f5e9;
-  --surface: #ffffff;
-  --elevated: #f1faf3;
-  --code: #f7fbf8;
-  --table-head: #c8e6c9;
-  --glass: rgba(255, 255, 255, 0.78);
-  --border: #c3e0c5;
-  --border-strong: #7fb289;
+  --page: #98e0bc;
+  --surface: #fbfefd;
+  --elevated: #d9f5e6;
+  --code: #d1f1e0;
+  --table-head: #8cdfb7;
+  --glass: rgba(251, 254, 253, 0.8);
+  --border: #5bb38a;
+  --border-strong: #07855a;
 
-  --text: #0c2015;
-  --text-2: #2f4a38;
-  --text-3: #40604b;
+  --text: #001d0f;
+  --text-2: #284b3a;
+  --text-3: #305141;
 
-  --accent: #047857;
-  --accent-hover: #065f46;
+  --accent: #026242;
+  --accent-hover: #005135;
   --accent-ink: #ffffff;
-  --accent-text: #047857;
-  --accent-tint: #e3f5ea;
-  --accent-tint-border: #8ac9a9;
-  --focus: #047857;
+  --accent-text: #026242;
+  --accent-tint: #b0f1d0;
+  --accent-tint-border: #0eab76;
+  --focus: #026242;
 
-  /* #059669 is the natural emerald and fails white at 3.8:1; #046c4e is one
-     step down and clears it at 6.4:1 */
-  --grad-a: #046c4e;
-  --grad-b: #047857;
-  --grad-c: #0e7490;
-  --glow: rgba(4, 120, 87, 0.24);
-  --glow-2: rgba(14, 116, 144, 0.16);
-  --ambient-1: rgba(4, 120, 87, 0.08);
-  --ambient-2: rgba(14, 116, 144, 0.05);
-  --inset-line: rgba(255, 255, 255, 0.9);
+  /* #059669 is the natural emerald and fails white at 3.8:1, so the accent is
+     fitted to a deeper step of the same hue that holds a white label */
+  --grad-a: #036c49;
+  --grad-b: #026443;
+  --grad-c: #026064;
+  --te-title-2: #104832;
+  --glow: rgba(2, 98, 66, 0.36);
+  --glow-2: rgba(2, 96, 100, 0.28);
+  --ambient-1: rgba(2, 98, 66, 0.17);
+  --ambient-2: rgba(2, 96, 100, 0.11);
+  --inset-line: rgba(255, 255, 255, 0.95);
 
   /* success is teal, not emerald: a green success on a green page says nothing */
-  --success: #0e7490;
-  --success-tint: #d9f2f7;
-  --warning: #8a5300;
-  --warning-tint: #fdead0;
-  --danger: #b4232a;
-  --danger-tint: #fce3e4;
+  --success: #026069;
+  --success-tint: #b3f3fb;
+  --warning: #794d01;
+  --warning-tint: #ffe1bd;
+  --danger: #a60424;
+  --danger-tint: #ffdddb;
 
   --shadow-sm: 0 1px 2px hsl(140 40% 25% / 0.08);
   --shadow-md: 0 4px 16px hsl(140 40% 25% / 0.12);
   --shadow-lg: 0 18px 48px hsl(140 40% 25% / 0.2);
   --shadow-glow: 0 20px 60px var(--glow);
-  --overlay: hsl(140 40% 15% / 0.32);
-  --scrollbar: #a9cdb4;
+  --overlay: rgba(1, 86, 57, 0.34);
+  --scrollbar: #3ca276;
   color-scheme: light;
 }
 
@@ -722,12 +737,13 @@ body {
    app cannot scroll away from. `position: fixed` keeps them still while the
    transcript scrolls, which is what makes them read as distance.
 
-   The peak alpha is a measured ceiling, not a taste call: at 0.20 the brightest
-   point of the strongest blob lifts the magenta page to about #2f2744, where
-   --text-3 still clears 5.1:1. Above ~0.26 tertiary metadata drops under 4.5:1
-   in the magenta palette, so the blobs stay dimmer than they could be. The
-   reading surfaces themselves (cards, code, tables) are opaque and sit on top
-   of all of it — that is the line between "atmosphere" and "colored prose". */
+   The peak alpha is a measured ceiling, not a taste call: at 0.42 the brightest
+   point of the strongest blob lifts the magenta page to about #652641, where
+   --text-3 still clears 5.1:1. Tertiary metadata is what sets the ceiling — it
+   is fitted against the lit page, not the flat one — and the light moods get a
+   0.17 budget instead, because a blob over paper darkens it. The reading
+   surfaces themselves (cards, code, tables) are opaque and sit on top of all of
+   it — that is the line between "atmosphere" and "colored prose". */
 body::before,
 body::after {
   content: "";
@@ -1308,16 +1324,16 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 }
 /* each swatch paints its own page, panel and accent; the accent stripe is the
    palette's two-stop gradient, so the menu previews the light, not just a hue */
-.swatch-violet { --sw-page: #0b0b12; --sw-panel: #12121c; --sw-accent: #9466f8; --sw-accent-2: #a78bfa; }
-.swatch-magenta { --sw-page: #0c0a11; --sw-panel: #151020; --sw-accent: #ec4899; --sw-accent-2: #f472b6; }
-.swatch-cyan { --sw-page: #080f16; --sw-panel: #0f1a24; --sw-accent: #06b6d4; --sw-accent-2: #22d3ee; }
-.swatch-ember { --sw-page: #0f0b06; --sw-panel: #17110a; --sw-accent: #f59e0b; --sw-accent-2: #fbbf24; }
-.swatch-jade { --sw-page: #06100c; --sw-panel: #0b1a14; --sw-accent: #10b981; --sw-accent-2: #34d399; }
-.swatch-lilac { --sw-page: #ece9fe; --sw-panel: #ffffff; --sw-accent: #7c3aed; --sw-accent-2: #9333ea; }
-.swatch-rose { --sw-page: #fce7f3; --sw-panel: #ffffff; --sw-accent: #be125f; --sw-accent-2: #9d174d; }
-.swatch-mist { --sw-page: #e3f2fd; --sw-panel: #ffffff; --sw-accent: #0e7490; --sw-accent-2: #0369a1; }
-.swatch-bloom { --sw-page: #fdf4e7; --sw-panel: #ffffff; --sw-accent: #b5471b; --sw-accent-2: #a21caf; }
-.swatch-sage { --sw-page: #e8f5e9; --sw-panel: #ffffff; --sw-accent: #046c4e; --sw-accent-2: #047857; }
+.swatch-violet { --sw-page: #08001c; --sw-panel: #1b0c36; --sw-accent: #b194fd; --sw-accent-2: #c0abfe; }
+.swatch-magenta { --sw-page: #150006; --sw-panel: #300219; --sw-accent: #fe75b0; --sw-accent-2: #fe97c0; }
+.swatch-cyan { --sw-page: #00070d; --sw-panel: #001b22; --sw-accent: #18dbfd; --sw-accent-2: #84e7fe; }
+.swatch-ember { --sw-page: #140000; --sw-panel: #261100; --sw-accent: #fc9f11; --sw-accent-2: #feb96b; }
+.swatch-jade { --sw-page: #000902; --sw-panel: #001e10; --sw-accent: #1cfdb0; --sw-accent-2: #acffd6; }
+.swatch-lilac { --sw-page: #d1c4fe; --sw-panel: #fdfdff; --sw-accent: #6f08d9; --sw-accent-2: #5d04b8; }
+.swatch-rose { --sw-page: #fdb6d1; --sw-panel: #fffdfd; --sw-accent: #9f045d; --sw-accent-2: #86024d; }
+.swatch-mist { --sw-page: #96d7fe; --sw-panel: #fcfeff; --sw-accent: #025b80; --sw-accent-2: #004b6b; }
+.swatch-bloom { --sw-page: #febc9f; --sw-panel: #fffdfc; --sw-accent: #8e3801; --sw-accent-2: #772e00; }
+.swatch-sage { --sw-page: #98e0bc; --sw-panel: #fbfefd; --sw-accent: #026242; --sw-accent-2: #005135; }
 .theme-item .theme-name { flex: 1 1 auto; min-width: 0; text-transform: capitalize; }
 .theme-item .theme-dot { flex: none; width: 12px; text-align: center; color: var(--accent-text); }
 
@@ -1911,8 +1927,9 @@ details.skill-def[open] > summary { margin-bottom: 6px; }
 
 /* Syntax highlighting (Prism, vendored in public/vendor/prism.min.js).
    Four inks only, taken from the palette rather than a separate rainbow, and
-   measured against the code fill in every palette — comment 5.0:1, keyword
-   5.5:1, string 5.6:1, number 6.9:1 at worst, and 6.7/6.8/9.1/9.9 in night.
+   measured against the code fill in every palette — at worst comment 7.3:1,
+   keyword 6.1:1, string 5.9:1, number 5.8:1, all in the light moods, where the
+   ink is dark on a tinted well; the dark stages clear 7.5:1 and up.
 
    Function names deliberately share the keyword color instead of taking their
    own hue: the obvious candidate was --danger, which painted every bash command
@@ -3220,7 +3237,10 @@ textarea:focus-visible,
   }
 }
 
-/* Increase Contrast: strengthen every hairline and label that carries meaning */
+/* Increase Contrast: strengthen every hairline and label that carries meaning.
+   The border is taken from the palette, not hard-coded: a fixed hex made this
+   mode a no-op on the palette whose normal border already matched it, and
+   repainted every other palette's edges in that one hue. */
 @media (prefers-contrast: more) {
   :root { --border: var(--border-strong); }
   .toolcall, .sr-item, .session-item.active { border-color: var(--text-3); }

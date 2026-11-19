@@ -587,8 +587,8 @@ function mermaidApi() {
 /** Mermaid's theme, read from the live palette.
  *
  *  Mermaid bakes its colors into the SVG, and none of its stock themes is
- *  this page: "default" is a lavender that clashes with all six palettes, and
- *  "dark" is not the same ink as `night`. The `base` theme exists to be
+ *  this page: "default" is a lavender that clashes with every palette, and
+ *  "dark" is not the same ink as `violet`. The `base` theme exists to be
  *  overridden, so the values come from the same custom properties the prose
  *  around the diagram uses — one definition of the palette, not two. */
 function mermaidConfig() {
@@ -7849,16 +7849,16 @@ function firstVisitTheme() {
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "lilac" : DEFAULT_THEME;
 }
 const THEME_CHROME = {
-  violet: "#0b0b12",
-  magenta: "#0c0a11",
-  cyan: "#080f16",
-  ember: "#0f0b06",
-  jade: "#06100c",
-  lilac: "#ece9fe",
-  rose: "#fce7f3",
-  mist: "#e3f2fd",
-  bloom: "#fdf4e7",
-  sage: "#e8f5e9",
+  violet: "#08001c",
+  magenta: "#150006",
+  cyan: "#00070d",
+  ember: "#140000",
+  jade: "#000902",
+  lilac: "#d1c4fe",
+  rose: "#fdb6d1",
+  mist: "#96d7fe",
+  bloom: "#febc9f",
+  sage: "#98e0bc",
 };
 /** a saved value from an older build (a retired palette, "light"/"dark", or one
  *  of the twelve moods this page used to ship) still has to resolve without
