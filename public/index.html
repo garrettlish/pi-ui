@@ -6,25 +6,26 @@
   <title>pi-ui</title>
   <meta name="description" content="A local web UI for the pi coding agent: streamed transcripts, session history, and a full inspector for every LLM and tool call.">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#c5dffb">
+  <meta name="theme-color" content="#0b0b12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <script>
     // apply the saved palette before first paint to avoid a flash. Unknown
-    // values (a retired palette, or the older "light"/"dark") resolve to one
-    // of the current moods. A first visit has nothing saved, so it follows the
-    // OS preference: forcing the light default on a dark desktop flashes a
-    // white page before style.css runs.
+    // values (a retired palette, or the older "light"/"dark") resolve to a
+    // mood of their own polarity. A first visit has nothing saved, so it follows
+    // the OS preference: a dark desktop gets a dark stage, a light one a light
+    // mood — forcing either one flashes the wrong color before style.css runs.
     (function () {
-      var known = ["mono", "sky", "grove", "ember", "elegant", "blossom", "crimson", "lagoon", "citrus", "honey", "night", "midnight"];
+      var known = ["violet", "magenta", "cyan", "ember", "jade", "lilac", "rose", "mist", "bloom", "sage"];
       var saved = localStorage.getItem("piweb-theme");
       var theme;
-      if (known.indexOf(saved) >= 0) theme = saved;
-      // retired values from older builds still have to land somewhere sane
-      else if (saved === "dark") theme = "night";
-      else if (saved === "light") theme = "sky";
-      else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) theme = "night";
-      else theme = "sky";
+      if (known.includes(saved)) theme = saved;
+      // retired values from older builds still have to land somewhere sane, and
+      // they keep their polarity: "light" should not come back on a dark stage
+      else if (saved === "light") theme = "lilac";
+      else if (saved === "dark") theme = "violet";
+      else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) theme = "lilac";
+      else theme = "violet";
       document.documentElement.dataset.theme = theme;
     })();
   </script>
@@ -34,8 +35,10 @@
     <aside id="sidebar">
       <div class="sidebar-head">
         <span class="logo">
-          <!-- the mark is drawn in currentColor so it follows the palette: a
-               terminal caret in a rounded square, no gradient, no glow -->
+          <!-- the mark is a terminal caret in a rounded square. It is drawn in
+               currentColor and the plate behind it carries the palette's
+               gradient, so the ink follows the polarity (dark ink on a light
+               gradient in the dark moods, white ink in the light ones) -->
           <span class="logo-mark">
             <svg viewBox="0 0 32 32" aria-hidden="true">
               <rect x="1.5" y="1.5" width="29" height="29" rx="8.5" fill="none" stroke="currentColor" stroke-width="2"/>
@@ -85,6 +88,12 @@
         </button>
       </div>
     </aside>
+
+    <!-- The narrow-window drawer's scrim: while the sidebar is a sheet over the
+         transcript, a tap meant for the dimmed page must close the sheet rather
+         than land on a row behind it. Inert (display:none) above the drawer
+         threshold, so the desktop layout is untouched. -->
+    <div id="sidebar-scrim" aria-hidden="true"></div>
 
     <div id="resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" title="Drag to resize · double-click to reset"></div>
 
@@ -324,6 +333,8 @@
        Prism's own auto-highlight is off: app.js highlights explicitly, because
        every transcript render replaces nodes and would otherwise re-scan the
        whole page. -->
+  <link rel="preload" href="/vendor/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/vendor/fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
   <script src="/vendor/prism.min.js" data-manual></script>
   <script src="/app.js"></script>
 </body>

@@ -1519,10 +1519,23 @@ try {
   );
 
   // The first paint cannot wait for app.js, so index.html decides the palette
-  // inline — and it has to agree with firstVisitTheme(), or a dark desktop gets
-  // a white flash and then a repaint.
+  // inline — and it has to agree with firstVisitTheme(), or a desktop gets the
+  // wrong stage and then a repaint. There are light and dark moods now, so the
+  // assertion follows the OS in *both* directions: a light desktop must land on
+  // a light mood and a dark one on a dark stage. Checking only for
+  // `prefers-color-scheme: dark` would pass a first visit that ignored a light
+  // desktop entirely.
   check("index.html picks the palette before paint", html.includes("document.documentElement.dataset.theme = theme"));
-  check("a first visit follows the OS theme", /prefers-color-scheme: dark/.test(html) && appJs.includes("(prefers-color-scheme: dark)"));
+  check(
+    "a first visit follows the OS theme in both directions",
+    /prefers-color-scheme: light/.test(html) && appJs.includes('matchMedia("(prefers-color-scheme: light)")')
+  );
+  // the inline copy and firstVisitTheme() have to name the same two moods, or one
+  // of the two paths paints a palette the other would not have chosen
+  check(
+    "the inline first paint agrees with firstVisitTheme",
+    html.includes('"lilac"') && html.includes('"violet"') && appJs.includes('return window.matchMedia')
+  );
 
   // The Follow-up control is a toggle: a second press removes what the first
   // press saved. Both halves have to be present — the pressed class the render

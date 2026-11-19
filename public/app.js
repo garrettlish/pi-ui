@@ -193,7 +193,11 @@ function applySidebarCollapsed(collapsed) {
 }
 
 function toggleSidebar() {
-  const collapsed = !sidebarCollapsed();
+  // The class is the truth, not the stored preference: below 720px the drawer
+  // starts closed without anything having been written to storage, so deriving
+  // the next state from the saved value would leave the first tap with nothing
+  // to do. Toggling the class makes the button work in both directions.
+  const collapsed = !document.body.classList.contains("sidebar-collapsed");
   if (collapsed) localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1");
   else localStorage.removeItem(SIDEBAR_COLLAPSED_KEY);
   applySidebarCollapsed(collapsed);
@@ -201,7 +205,51 @@ function toggleSidebar() {
 
 document.getElementById("btn-sidebar-collapse").addEventListener("click", toggleSidebar);
 document.getElementById("btn-sidebar-expand").addEventListener("click", toggleSidebar);
-applySidebarCollapsed(sidebarCollapsed());
+/** The narrow-window drawer threshold, mirrored from the 720px media query in
+ *  style.css that turns the sidebar into an off-canvas panel. Kept as a named
+ *  constant because `applySidebarCollapsed(sidebarCollapsed())` below needs to
+ *  know whether "not collapsed" still means "on screen". */
+const NARROW_WINDOW = 720;
+applySidebarCollapsed(sidebarCollapsed() || window.innerWidth <= NARROW_WINDOW);
+// A window can be resized across the threshold after boot (a desktop window
+// dragged narrow, a tablet rotated). The drawer state follows the width, so a
+// wide window that becomes narrow closes the panel instead of leaving a
+// full-height column taking half the screen — and vice versa.
+let wasNarrow = window.innerWidth <= NARROW_WINDOW;
+window.addEventListener("resize", () => {
+  const isNarrow = window.innerWidth <= NARROW_WINDOW;
+  if (isNarrow === wasNarrow) return;
+  wasNarrow = isNarrow;
+  // Crossing back to a wide window restores the reader's own preference; the
+  // inline width is cleared so the CSS (or a fresh drag) owns it again.
+  if (!isNarrow) {
+    $("#sidebar").style.width = "";
+    $("#sidebar").style.minWidth = "";
+    applySidebarCollapsed(sidebarCollapsed());
+  } else {
+    applySidebarCollapsed(true);
+  }
+});
+// A tap on the scrim closes the drawer. It only receives pointer events while
+// the drawer is open (see style.css), so this handler is inert on desktop.
+$("#sidebar-scrim").addEventListener("click", () => {
+  applySidebarCollapsed(true);
+  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1");
+});
+// Escape closes the drawer too. It is checked before the global Esc handlers
+// (abort a run) would act on it, and only when the drawer is actually open, so
+// on a wide window Esc keeps its existing meaning.
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key !== "Escape") return;
+    if (window.innerWidth > NARROW_WINDOW) return;
+    if (document.body.classList.contains("sidebar-collapsed")) return;
+    applySidebarCollapsed(true);
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1");
+  },
+  true // capture: the drawer owns Esc while it is open
+);
 
 // ---------------------------------------------------------------------------
 // server bridge
@@ -7724,6 +7772,10 @@ const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 560;
 
 function applySidebarWidth(px) {
+  // A dragged width is a desktop preference. Below the drawer threshold the
+  // sidebar's width comes from the media query, so writing an inline width here
+  // would override it and put a 280px column back onto a 390px window.
+  if (window.innerWidth <= NARROW_WINDOW) return;
   const w = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, px));
   $("#sidebar").style.width = `${w}px`;
   $("#sidebar").style.minWidth = `${w}px`;
@@ -7760,60 +7812,63 @@ applySidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 280);
 // ---------------------------------------------------------------------------
 // theme
 //
-// A dozen standalone palettes, not a light/dark or depth ramp: the button opens
-// a listbox of swatches, grouped by polarity because that is the choice a
-// reader actually makes first, and picking one re-points the tokens in
-// style.css. The theme name is also the document attribute, so no per-theme
-// class juggling is needed and an unknown saved value falls back to the default.
+// Ten standalone palettes: five hue families, each as a dark stage and a light
+// mood. The button opens a listbox of swatches, grouped by polarity because that
+// is the choice a reader actually makes first, and picking one re-points the
+// tokens in style.css. The theme name is also the document attribute, so no
+// per-theme class juggling is needed and an unknown saved value falls back to
+// the default.
 // ---------------------------------------------------------------------------
 const ICON_SUN = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`;
 const ICON_MOON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`;
-/** every palette, light moods first: this order is also the menu order */
+/** every palette, in menu order: the five light moods first, matching the
+ *  picker's Light-then-Dark grouping, then the five dark stages. Each family
+ *  sits in both halves, so the menu reads as five hues in two polarities. */
 const THEMES = [
-  "mono",
-  "sky",
-  "grove",
+  "lilac",
+  "rose",
+  "mist",
+  "bloom",
+  "sage",
+  "violet",
+  "magenta",
+  "cyan",
   "ember",
-  "elegant",
-  "blossom",
-  "crimson",
-  "lagoon",
-  "citrus",
-  "honey",
-  "night",
-  "midnight",
+  "jade",
 ];
-/** the palettes that paint a dark page: the picker groups them and the toolbar
- *  icon reads its polarity from this list rather than from the palette name */
-const DARK_THEMES = ["night", "midnight"];
-const DEFAULT_THEME = "sky";
+/** The palettes that paint a dark page: the picker groups by this list and the
+ *  toolbar icon reads its polarity from it rather than from the palette name. */
+const DARK_THEMES = ["violet", "magenta", "cyan", "ember", "jade"];
+const DEFAULT_THEME = "violet";
 /** The palette a first visit gets. The page cannot ask before `boot()` runs, so
  *  `index.html` has an inline copy of this decision to paint the right color
- *  before style.css loads; both must agree, and both follow the OS preference
- *  rather than forcing light on a dark desktop. */
+ *  before style.css loads; both must agree, and both follow the OS preference —
+ *  a dark desktop gets a dark stage, a light one gets a light mood, so the first
+ *  paint matches the room it opens in. */
 function firstVisitTheme() {
-  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "night" : DEFAULT_THEME;
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "lilac" : DEFAULT_THEME;
 }
 const THEME_CHROME = {
-  mono: "#dce4f9",
-  sky: "#c5dffb",
-  grove: "#cbf6e0",
-  ember: "#ffe1c7",
-  elegant: "#ecd5fc",
-  blossom: "#ffcce4",
-  crimson: "#ffd1d3",
-  lagoon: "#cef0f8",
-  citrus: "#edf9cd",
-  honey: "#fef1cd",
-  night: "#0c0e18",
-  midnight: "#150c18",
+  violet: "#0b0b12",
+  magenta: "#0c0a11",
+  cyan: "#080f16",
+  ember: "#0f0b06",
+  jade: "#06100c",
+  lilac: "#ece9fe",
+  rose: "#fce7f3",
+  mist: "#e3f2fd",
+  bloom: "#fdf4e7",
+  sage: "#e8f5e9",
 };
-/** a saved value from an older build (a retired palette, or "light"/"dark")
- *  still has to resolve, so anything unknown maps onto the closest match */
+/** a saved value from an older build (a retired palette, "light"/"dark", or one
+ *  of the twelve moods this page used to ship) still has to resolve without
+ *  throwing, so anything unknown maps onto the closest mood. The two generic
+ *  names land on their own polarity, so a reader who had picked "light" once is
+ *  not returned to a dark stage. */
 function normalizeTheme(theme) {
   if (THEMES.includes(theme)) return theme;
-  if (theme === "dark") return "night";
-  if (theme === "light") return DEFAULT_THEME;
+  if (theme === "light") return "lilac";
+  if (theme === "dark") return DEFAULT_THEME;
   return firstVisitTheme();
 }
 /** parse a static SVG string into a live element (no untrusted input) */
