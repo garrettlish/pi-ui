@@ -691,7 +691,10 @@ async function redrawMermaid() {
   mermaidRepaintPending = true;
   try {
     m.initialize(mermaidConfig());
-    const nodes = [...document.querySelectorAll(".md-mermaid")];
+    // `querySelectorAll` is typed to Element, which has no `dataset`. The nodes
+    // here are always the divs renderMarkdown emits, so the cast states what the
+    // selector already guarantees instead of widening the check.
+    const nodes = /** @type {HTMLElement[]} */ ([...document.querySelectorAll(".md-mermaid")]);
     for (const node of nodes) {
       node.classList.remove("rendered");
       delete node.dataset.done;
@@ -782,7 +785,10 @@ function renderMarkdown(text) {
     }
     const h = line.match(/^(#{1,4})\s+(.*)/);
     if (h) {
-      const level = Math.min(h[1].length + 1, 4);
+      // `#` -> h2, so the page's own h1 stays the only h1. The cap used to be 4,
+      // which mapped `###` and `####` onto the same tag: a four-level document
+      // rendered as three levels, with two different headings looking identical.
+      const level = Math.min(h[1].length + 1, 5);
       out.push(`<h${level}>${inlineMd(h[2])}</h${level}>`);
       i++;
       continue;
@@ -1063,9 +1069,9 @@ function buildItemsFromEntries(entries) {
           items.push({ kind: "summary", title: `custom [${entry.customType}]`, text, data: entry, ts: entry.timestamp });
         }
       } else if (entry.type === "custom") {
-        items.push({ kind: "notice", text: `custom entry [${entry.customType}]`, data: entry });
+        items.push({ kind: "notice", text: `custom entry [${entry.customType}]`, data: entry, trace: true });
       } else if (entry.type === "context_edit") {
-        items.push({ kind: "notice", text: "context edit", data: entry });
+        items.push({ kind: "notice", text: "context edit", data: entry, trace: true });
       }
       continue;
     }
@@ -1152,7 +1158,7 @@ function buildItemsFromEntries(entries) {
         break;
       }
       default:
-        items.push({ kind: "notice", text: `message [${m?.role}]`, data: m });
+        items.push({ kind: "notice", text: `message [${m?.role}]`, data: m, trace: true });
     }
   }
   return items;
@@ -3294,9 +3300,16 @@ function renderItem(item) {
     case "subagentNotice":
       return renderSubagentNotice(item);
     case "notice": {
-      const chip = el("div", { class: "notice-chip", text: item.text });
+      // A trace-level notice records what the session file holds (a custom
+      // entry, a context edit, an unhandled message role). Those are not events
+      // the reader acted on, but they were drawn exactly like one — a centred
+      // pill with its own surface. Measured on one 28-item session, 6 of its 10
+      // notices were trace-level, so a third of the transcript was chrome around
+      // bookkeeping. They keep their position in the log and lose the chip.
+      const cls = item.trace ? "notice-trace" : "notice-chip";
+      const chip = el("div", { class: cls, text: item.text });
       if (item.data) chip.addEventListener("click", () => openJson("entry", item.data));
-      return el("div", { class: "item item-notice" }, chip);
+      return el("div", { class: `item item-notice${item.trace ? " quiet" : ""}` }, chip);
     }
     default:
       return el("div", { class: "item dim", text: `[${item.kind}]` });
@@ -3433,7 +3446,15 @@ function hydrateMermaid(root, { follow = false } = {}) {
 }
 
 let renderScheduled = false;
-/** Keeps elapsed-time labels counting; see the interval below. */
+/** Keeps elapsed-time labels counting; see the interval below.
+ *
+ *  Deliberately a named binding that nothing reads: the interval is the thing
+ *  that matters, and naming it is what lets a debugger find the timer and what
+ *  test/smoke.js pins (it asserts this assignment exists and is fed by
+ *  STALL_REPAINT_MS — two regression checks fail if it becomes an anonymous
+ *  `setInterval`). Reading it just to satisfy an unused-variable heuristic would
+ *  be a no-op statement pretending to be code. */
+// eslint-disable-next-line no-unused-vars -- see the comment above
 let elapsedTimer = null;
 function scheduleRender() {
   if (renderScheduled) return;
@@ -3602,7 +3623,22 @@ function renderModelPicker() {
   const current = state.model
     ? state.models.find((m) => m.provider === state.model.provider && m.id === state.model.id)
     : null;
-  btn.replaceChildren(...htmlFragment(pickerLabel(current ? current.name || current.id : "select model")));
+  // The active model is not necessarily in the picker's list: the list arrives
+  // already filtered by enabledModels (15 providers -> 2 models on this machine),
+  // while a session can be running a model that filter left out. Looking it up
+  // only in `state.models` therefore fell through to the placeholder, and the
+  // header read "select model" over a session that was plainly answering with
+  // deepseek-local — the one label in the toolbar that misreported what pi was
+  // doing. The model object itself always names it, so use it as the fallback.
+  const label = current
+    ? current.name || current.id
+    : state.model
+      ? `${state.model.name || state.model.id}`
+      : "select model";
+  btn.replaceChildren(...htmlFragment(pickerLabel(label)));
+  btn.title = current || !state.model
+    ? "Model"
+    : `Model — ${state.model.provider}/${state.model.id} (not in the enabled list)`;
 
   // Rebuild only when the option set or the selection changed: renderHeader
   // runs on nearly every event, and rebuilding the open menu would drop focus.
@@ -7843,6 +7879,66 @@ document.addEventListener("keydown", (e) => {
   const at = themeIndex(document.documentElement.dataset.theme);
   applyTheme(THEMES[Math.min(THEMES.length - 1, Math.max(0, at + step))]);
 });
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  // Tab must stay inside the sheet that is on top. Without this the focus walked
+  // straight out of an open popup into the sidebar behind it — measured: from a
+  // tool popup, four Tabs reached #btn-sidebar-collapse and then the sidebar's
+  // tabs, i.e. the reader was typing into a page dimmed by a modal. Sheets are
+  // ordered by z-index; the topmost open one owns the keyboard.
+  const sheet = topmostSheet();
+  if (!sheet) return;
+  const focusables = tabbablesIn(sheet);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (!sheet.contains(active)) {
+    // focus escaped (or never entered): put it back at the near edge of the sheet
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus({ preventScroll: true });
+    return;
+  }
+  if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+});
+
+/** The topmost open sheet: the one whose overlay is visible and ranks highest.
+ *  A sheet is an overlay plus the dialog inside it, so the same helper covers
+ *  the tool popup, extension dialogs, the resources inspector, search and the
+ *  workspace picker. */
+function topmostSheet() {
+  let best = null;
+  let bestZ = -1;
+  for (const id of ["#modal-overlay", "#dialog-overlay", "#ws-overlay", "#search-overlay", "#resources-overlay"]) {
+    const overlay = $(id);
+    if (!overlay || overlay.classList.contains("hidden")) continue;
+    const z = Number(getComputedStyle(overlay).zIndex) || 0;
+    if (z > bestZ) {
+      bestZ = z;
+      best = overlay;
+    }
+  }
+  return best;
+}
+
+/** Focusable descendants of a sheet, in tab order. Disabled and visually hidden
+ *  controls are skipped, because including them would make the trap look broken
+ *  (a Tab that appears to do nothing). */
+function tabbablesIn(root) {
+  const sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  return [...root.querySelectorAll(sel)].filter((el) => {
+    if (el.closest(".hidden")) return false;
+    const cs = getComputedStyle(el);
+    return cs.display !== "none" && cs.visibility !== "hidden" && el.getClientRects().length > 0;
+  });
+}
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {

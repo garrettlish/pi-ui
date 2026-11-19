@@ -905,13 +905,21 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   display: flex; align-items: center; gap: 6px;
   min-width: 0; flex: 1 1 auto; position: relative;
 }
+/* The name owns whatever room the read-outs do not need, and never collapses
+   below a few characters: with `min-width: 0` it measured 0 px wide from 700 px
+   down, so a narrow window showed no session title at all. `flex-shrink: 0` on
+   .topbar-right is what squeezed it — the read-outs refused to give up a pixel. */
 #session-name {
   font-weight: 600; font-size: 13px; letter-spacing: -0.1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  min-width: 0; max-width: 40vw;
+  flex: 1 1 auto; min-width: 9ch; max-width: 40vw;
 }
 #btn-session-info { flex: none; }
-.topbar-right { display: flex; align-items: center; gap: 6px; flex: none; }
+/* Read-outs may shrink and clip before the title does; each narrow breakpoint
+   below then drops a whole read-out, so nothing ever ends up a 30 px stub with
+   its number cut in half (measured: at 900 px the ctx and cost pills were 30 px
+   wide, i.e. the label only). */
+.topbar-right { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; }
 /* separates read-only read-outs from the controls beside them */
 .topbar-sep {
   flex: none; width: 1px; height: 18px; margin: 0 4px;
@@ -920,7 +928,7 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 
 /* header read-outs: quiet pills; only the context/cost numbers carry a tint */
 .badge {
-  flex: none; padding: 3px 9px;
+  flex: 0 1 auto; min-width: 0; padding: 3px 9px;
   background: var(--elevated); border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   font-size: 11.5px; color: var(--text-2);
@@ -931,9 +939,9 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 /* pickers (model, thinking level, theme): in-app listboxes rather than native
    <select>, so position, max height and theme are ours — js clamps the open
    menu's height to the room below the button. */
-.picker { position: relative; flex: none; }
+.picker { position: relative; flex: none; min-width: 0; }
 .picker-btn {
-  gap: 6px; max-width: 210px; min-height: 28px;
+  gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 210px; min-height: 28px;
   padding: 3px 9px; font-size: 12px;
   background: var(--elevated); border-color: transparent; color: var(--text);
 }
@@ -1503,14 +1511,43 @@ details.skill-def[open] > summary { margin-bottom: 6px; }
 .assistant-text .md-mermaid-note {
   margin-top: 6px; font-size: 11.5px; color: var(--text-3);
 }
-.assistant-text h1,
-.assistant-text h2,
-.assistant-text h3 {
-  margin: 14px 0 6px; font-size: 15px; font-weight: 600; letter-spacing: -0.15px;
-}
+/* Heading scale. renderMarkdown maps `#`..`####` onto h2..h5 (h1 stays the
+   page's own), so four levels have to be four visible steps. h1-h3 used to share
+   one rule and h4/h5 fell through to the UA defaults, which rendered `###` and
+   `####` identically and overshot the third level's leading. Each level now has
+   its own size, and the deeper it is the tighter its leading — which is how a
+   document reads as one outline rather than four fonts. */
+.assistant-text h2 { margin: 16px 0 7px; font-size: 16px; font-weight: 600; letter-spacing: -0.2px; }
+.assistant-text h3 { margin: 14px 0 6px; font-size: 14.5px; font-weight: 600; letter-spacing: -0.1px; }
+.assistant-text h4 { margin: 12px 0 5px; font-size: 13.5px; font-weight: 600; letter-spacing: 0; }
+.assistant-text h5 { margin: 10px 0 4px; font-size: 13px; font-weight: 600; letter-spacing: 0; color: var(--text-2); }
 .assistant-text h1:first-child,
 .assistant-text h2:first-child,
-.assistant-text h3:first-child { margin-top: 0; }
+.assistant-text h3:first-child,
+.assistant-text h4:first-child,
+.assistant-text h5:first-child { margin-top: 0; }
+/* Reading measure.
+ *
+ * The transcript itself keeps no max-width — that decision stands, and the
+ * comment above explains why (no dead gutter down either side of the column).
+ * What it costs is measurable at the paragraph level: at 1512 px the content
+ * column measured 1107 px, which is 132 `ch` — about 82 CJK characters, or ~170
+ * latin ones, per line. Comfortable CJK reading is 30–40 characters.
+ *
+ * So the cap goes on flowing prose only: paragraphs, list items and quotes. Code
+ * blocks, tables, diffs and diagrams keep the full column, which is what makes
+ * this different from a max-width on the transcript — the wide things stay wide,
+ * and only the thing being read line by line is measured. `78ch` is ~39 CJK
+ * characters at this font size, and 78 is the classic upper bound for
+ * single-column prose. */
+.assistant-text p,
+.assistant-text li,
+.assistant-text blockquote,
+.assistant-text h2,
+.assistant-text h3,
+.assistant-text h4,
+.assistant-text h5 { max-width: 78ch; }
+
 .assistant-text ul, .assistant-text ol { margin: 4px 0 8px; padding-left: 22px; }
 .assistant-text li { margin: 2px 0; }
 /* a nested list belongs to its parent item: without the tight top margin the
@@ -1627,6 +1664,26 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
   border-radius: var(--radius-pill); color: var(--text-2); font-size: 12px;
   cursor: default;
 }
+/* Trace-level notices.
+ *
+ * `custom entry [pretty-tui-response-footer]`, `context edit` and
+ * `usage [assistant] …` are records of what the session file contains, not
+ * things the reader needs to read — but each one was drawn as a centred pill
+ * with its own surface and border, the same weight as a real notice. Measured
+ * on one 28-item session: 10 notices, 6 of them trace-level, i.e. a third of the
+ * transcript was chrome. They keep their place in the log (the log is the
+ * product) and lose the pill: left-aligned, mono, hairline rule, no fill. */
+.item-notice.quiet { text-align: left; }
+.item-notice .notice-trace {
+  display: block; max-width: 100%;
+  padding: 1px 0 1px 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-3);
+  font-family: var(--mono); font-size: 11px; line-height: 1.6;
+  word-break: break-word;
+  cursor: pointer;
+}
+.item-notice .notice-trace:hover { color: var(--text-2); border-left-color: var(--border-strong); }
 .item-notice .notice-chip .n-title { font-weight: 600; color: var(--text); }
 .item-notice .notice-chip .n-body { white-space: pre-wrap; text-align: left; }
 /* A notice with a title and a long body is a block, not a pill. Multi-line
@@ -2383,8 +2440,12 @@ body.dropping .composer-field { border-color: var(--accent); border-style: dashe
 }
 
 /* ---------------- toasts ---------------- */
+/* Toasts sit *below* the toolbar. At `top: 14px` a 38 px toast covered two of
+   the header's own buttons (measured: #btn-prompt-list and #btn-theme) in the
+   top-right corner of a 1440 px window — a notification about one thing made
+   another thing unclickable. The offset clears the 47 px toolbar. */
 #toasts {
-  position: fixed; top: 14px; right: 14px; z-index: 80;
+  position: fixed; top: 60px; right: 14px; z-index: 80;
   display: flex; flex-direction: column; gap: 8px; max-width: 420px;
 }
 .toast {
@@ -2733,16 +2794,52 @@ textarea:focus-visible,
   .tc-summary, .s-meta, .res-desc { color: var(--text); }
 }
 
-/* narrow windows: the toolbar is a single row, so drop the least critical
-   read-outs before anything can overlap or overflow */
-@media (max-width: 1000px) {
-  #session-name { max-width: 24vw; }
+/* Narrow windows: the toolbar is one row, so it sheds whole read-outs in the
+   order a reader can live without them rather than letting the flex box squeeze
+   each one into a 30 px stub. The order is measured, not guessed — each step
+   keeps the title above 9ch from 1440 px down to 480 px (see the comment on
+   #session-name for what the old rules produced: a zero-width title). */
+@media (max-width: 1100px) {
+  /* the context pill is the widest read-out (174 px) and its numbers are also
+     in the session-details popover, one click away */
+  #context-usage { display: none; }
+}
+@media (max-width: 940px) {
   #session-cost { display: none; }
-  .picker-btn { max-width: 150px; }
+  .topbar-sep { display: none; }
+  /* The model name is long ("DeepSeek V4.1 Flash (local vLLM)"). At its 210 px
+     max it took the room the title needed, so below this width the label
+     ellipsizes rather than the title shrinking — the full provider/id is on the
+     button's title attribute. */
+  .picker-btn { max-width: 132px; }
+}
+@media (max-width: 780px) {
+  #btn-thinking-all { display: none; }
+  /* the model label drops to an ellipsized stub here rather than eating the
+     title: measured at 760 px, a 132 px label plus the 91 px thinking picker and
+     the two 30 px buttons left the title 110 px and clipped */
+  .picker-btn { max-width: 104px; }
+  /* the prompt outline is the one button a 700 px window can spare: the same
+     prompts are reachable by scrolling, and by then the title (100 px) was
+     clipped to hold it */
+  #btn-prompt-list { display: none; }
+}
+@media (max-width: 660px) {
+  /* the thinking level is also the `think:` segment of the running line, so the
+     picker is the one control a phone-sized window can drop */
+  #thinking-picker-btn { display: none; }
+  .picker-btn { max-width: 118px; }
+}
+@media (max-width: 600px) {
+  /* last step: a session-details button whose whole content is a glyph is not
+     worth a clipped title, and every field it shows is also in the DOM the
+     transcript prints */
+  #btn-session-info { display: none; }
+  .picker-btn { max-width: 104px; }
 }
 @media (max-width: 720px) {
   #topbar { padding: 6px 8px; gap: 6px; }
-  #session-name { display: none; }
+  #session-name { min-width: 7ch; max-width: 46vw; }
   #transcript { padding: 12px 12px 24px; }
   #composer { padding: 8px 10px 10px; }
   #modal, #dialog { width: 100%; max-height: 100%; border-radius: 0; border: 0; }
