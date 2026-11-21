@@ -7821,24 +7821,26 @@ applySidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 280);
 // ---------------------------------------------------------------------------
 const ICON_SUN = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`;
 const ICON_MOON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`;
-/** every palette, in menu order: the five light moods first, matching the
- *  picker's Light-then-Dark grouping, then the five dark stages. Each family
- *  sits in both halves, so the menu reads as five hues in two polarities. */
+/** every palette, in menu order: the six light moods first, matching the
+ *  picker's Light-then-Dark grouping, then the six dark stages. Each family
+ *  sits in both halves, so the menu reads as six hues in two polarities. */
 const THEMES = [
   "lilac",
   "rose",
   "mist",
   "bloom",
   "sage",
+  "dawn",
   "violet",
   "magenta",
   "cyan",
   "ember",
   "jade",
+  "sunset",
 ];
 /** The palettes that paint a dark page: the picker groups by this list and the
  *  toolbar icon reads its polarity from it rather than from the palette name. */
-const DARK_THEMES = ["violet", "magenta", "cyan", "ember", "jade"];
+const DARK_THEMES = ["violet", "magenta", "cyan", "ember", "jade", "sunset"];
 const DEFAULT_THEME = "violet";
 /** The palette a first visit gets. The page cannot ask before `boot()` runs, so
  *  `index.html` has an inline copy of this decision to paint the right color
@@ -7859,6 +7861,8 @@ const THEME_CHROME = {
   mist: "#96d7fe",
   bloom: "#febc9f",
   sage: "#98e0bc",
+  dawn: "#e6d9fb",
+  sunset: "#0e0528",
 };
 /** a saved value from an older build (a retired palette, "light"/"dark", or one
  *  of the twelve moods this page used to ship) still has to resolve without

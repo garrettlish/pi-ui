@@ -10,7 +10,7 @@
    prose, code blocks and tables sit on opaque fills, so a page of neon chrome
    never turns into a page of colored text.
 
-   Ten palettes: five hue families, each in a dark and a light polarity. The
+   Twelve palettes: six hue families, each in a dark and a light polarity. The
    polarity is not a filter over one set of colors: it flips which side of the
    scale carries the ink. A dark palette uses a *light* accent with dark ink on
    it; a light palette uses a *deep* accent with white ink on it. Both give the
@@ -23,11 +23,14 @@
      cyan      cyan                 mist
      amber     ember                bloom
      emerald   jade                 sage
+     sunset    sunset               dawn
 
    Each family keeps its hue across both polarities, so switching polarity is a
    change of room rather than of subject. Aurora was dropped: it was a second
    violet with extra hues in its gradient, which read as `violet` at a glance in
-   the picker. Five clearly different hues, twice, is the better menu.
+   the picker. Sunset is the case that survives the same test, because its
+   *accent* is gold: no other stage uses gold for a primary action, so the
+   swatch reads as a different ink even though its ground is another indigo.
 
    Two tokens carry the whole dark/light difference, because every component
    rule below is written once:
@@ -53,7 +56,7 @@
    Contrast is a build constraint, not a review note, and it is enforced by
    test/smoke.js rather than trusted to this comment. Every text pair clears
    4.5:1 against the page, the card surface, the elevated fill, the table band
-   *and* the selected-row tint — 35 pairs per palette, in all ten moods. The
+   *and* the selected-row tint — 35 pairs per palette, in all twelve moods. The
    accent is also printed on those same fills as text (`.turn-action.primary`),
    so it is fitted against the tint too. Tertiary metadata is additionally fitted
    against the ambient blob at its brightest, which is the pair that actually
@@ -110,6 +113,15 @@
   --glow-2: rgba(253, 20, 169, 0.46);
   --ambient-1: rgba(177, 148, 253, 0.42);
   --ambient-2: rgba(253, 20, 169, 0.3);
+  /* the sky: an optional wash across the top of the stage, painted on `body`
+     under everything else. Most palettes are lit by the drifting blobs alone and
+     leave it `none`; a palette with a horizon (sunset, dawn) sets it and gets a
+     ground that is brighter above the fold and falls away below, which is the
+     difference between a stage and a room with a window in it. It is a token
+     rather than a theme-scoped rule so the one `body` rule below stays the only
+     place a background is composed. Alpha is fitted the same way --ambient-* is:
+     tertiary metadata and the glass toolbar both sit on it. */
+  --sky: none;
   /* the highlight along the top edge of a raised card: white on a dark stage,
      ink on a light one */
   --inset-line: rgba(255, 255, 255, 0.08);
@@ -164,7 +176,7 @@
 }
 
 /* ---------------------------------------------------------------------------
-   The five dark stages.
+   The six dark stages.
 --------------------------------------------------------------------------- */
 
 /* magenta: hot-pink neon on a plum-tinged black. The page keeps the accent's
@@ -374,8 +386,87 @@
   color-scheme: dark;
 }
 
+/* sunset: neon dusk. An indigo night whose light crosses from hot pink to
+   tangerine — the one gradient in the set that is two *different* hues rather
+   than two steps of one, which is what makes the primary button, the logo and
+   the user turn's edge read as a lit horizon instead of a solid fill.
+
+   The accent is gold rather than the pink, and that is the whole reason this
+   family is not a second violet: gold is the ink a reader's eye lands on in a
+   dark UI (it is how a stat, a count or a price is written), so the accent —
+   which paints tool-card edges, links and the selected row — is gold while the
+   pink and the tangerine stay in the gradient, where a large area of them is
+   wanted and a small area of them is not. The tint is plum, not brown: a gold
+   wash at this lightness reads muddy on indigo, and the plum is where the
+   pink lives, so the context chip comes out as dark plum with a gold number. */
+:root[data-theme="sunset"] {
+  --page: #0e0528;
+  --surface: #241350;
+  --elevated: #3a2470;
+  --code: #08011a;
+  --table-head: #462d7c;
+  --glass: rgba(36, 19, 80, 0.78);
+  --border: #553c90;
+  --border-strong: #9469e2;
+
+  --text: #fdf6ff;
+  --text-2: #cfc0ee;
+  --text-3: #c0b2de;
+
+  --accent: #ffb02e;
+  --accent-hover: #ffc45e;
+  --accent-ink: #23072e;
+  --accent-text: #ffb02e;
+  --accent-tint: #521a5e;
+  --accent-tint-border: #d8a13a;
+  --focus: #ffd48a;
+
+  --grad-a: #ff2e88;
+  --grad-b: #ff9a3c;
+  /* the far light: the violet in the sky above the horizon, so a two-light
+     gradient stays in this palette's own dusk rather than borrowing another
+     family's second stop */
+  --grad-c: #b06bff;
+  --te-title-2: #dccff2;
+  --glow: rgba(255, 46, 136, 0.6);
+  --glow-2: rgba(255, 154, 60, 0.46);
+  --ambient-1: rgba(255, 46, 136, 0.42);
+  --ambient-2: rgba(255, 154, 60, 0.3);
+  /* one step brighter than the other stages: this palette's cards are meant to
+     read as glass panes catching the horizon, and the pink glow behind them is
+     already doing the lifting a heavier white line would overstate */
+  --inset-line: rgba(255, 255, 255, 0.12);
+  /* the horizon itself: pink overhead, tangerine where it meets the ground, and
+     gone by the first third of the viewport — the transcript below it is read
+     against the plain stage, which is why this can be as loud as it is */
+  --sky: radial-gradient(
+    145% 60% at 50% -4%,
+    rgba(255, 46, 136, 0.46),
+    rgba(255, 110, 90, 0.22) 34%,
+    rgba(255, 154, 60, 0.07) 60%,
+    rgba(255, 154, 60, 0) 78%
+  );
+
+  /* success stays teal — a green "done" beside a gold accent is a second bright
+     hue competing for the same glance */
+  --success: #1bf4bb;
+  --success-tint: #003a2a;
+  --warning: #fecd5d;
+  --warning-tint: #3f2d00;
+  --danger: #fe7c7b;
+  --danger-tint: #5a1116;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.7);
+  --shadow-glow: 0 20px 60px var(--glow);
+  --overlay: rgba(5, 0, 16, 0.76);
+  --scrollbar: #7a4a9e;
+  color-scheme: dark;
+}
+
 /* ---------------------------------------------------------------------------
-   The five light palettes.
+   The six light palettes.
 
    These are not the dark moods dimmed. The polarity flips, so the accent is a
    deep saturated ink instead of a bright one: --accent is printed as text on
@@ -647,6 +738,77 @@
   color-scheme: light;
 }
 
+/* dawn: the same dusk, an hour later. The ground is the sky itself — a pale
+   lavender with a rose horizon washing its top edge — and the sunset's gold
+   arrives as *ink* rather than as the page. That is the whole trick of this
+   palette: gold printed on gold paper is one beige mass with nothing to look
+   at, which is what the first cut of `dawn` got wrong; on a cool ground the
+   bronze-gold accent reads as gold, exactly as it does on the dark stage.
+
+   The gradient is the dark stage's horizon stepped down until a white label
+   clears every stop of it — deep rose into burnt amber, with violet as the far
+   light. The sky wash is *lighter* than the ground, so it reads as light
+   arriving at the top of the page rather than as a stain on it (the failure
+   mode the light-polarity ambient budget exists to prevent). */
+:root[data-theme="dawn"] {
+  --page: #e6d9fb;
+  --surface: #fdfcff;
+  --elevated: #f3ecff;
+  --code: #eee6ff;
+  --table-head: #dbcefa;
+  --glass: rgba(253, 252, 255, 0.8);
+  --border: #b09cdd;
+  --border-strong: #7a55c2;
+
+  --text: #1f1230;
+  --text-2: #4c3c64;
+  --text-3: #4e3e66;
+
+  /* the accented step of the dark stage's gold, fitted to hold white ink as a
+     fill and 4.5:1 as text on every paper below it */
+  --accent: #8a5200;
+  --accent-hover: #6f4200;
+  --accent-ink: #ffffff;
+  --accent-text: #8a5200;
+  /* where the gold is seen as a *fill*: the context chip, the selected row */
+  --accent-tint: #f8e2b4;
+  --accent-tint-border: #c08a1e;
+  --focus: #8a5200;
+
+  --grad-a: #a3125f;
+  --grad-b: #9c4300;
+  --grad-c: #6a1fd0;
+  --te-title-2: #3f2f56;
+  --glow: rgba(163, 18, 95, 0.3);
+  --glow-2: rgba(156, 67, 0, 0.24);
+  --ambient-1: rgba(166, 26, 120, 0.15);
+  --ambient-2: rgba(190, 110, 20, 0.1);
+  --inset-line: rgba(255, 255, 255, 0.95);
+  /* the rose horizon: gone by the first card, and brighter than the ground it
+     sits on, so tertiary metadata over its brightest point still clears 4.8:1 */
+  --sky: radial-gradient(
+    150% 65% at 50% -6%,
+    rgba(255, 130, 180, 0.48),
+    rgba(255, 176, 170, 0.2) 42%,
+    rgba(255, 200, 200, 0) 74%
+  );
+
+  --success: #02623f;
+  --success-tint: #c1f4d8;
+  --warning: #784c01;
+  --warning-tint: #ffe1bd;
+  --danger: #a60424;
+  --danger-tint: #ffdddb;
+
+  --shadow-sm: 0 1px 2px hsl(262 40% 30% / 0.08);
+  --shadow-md: 0 4px 16px hsl(262 40% 30% / 0.12);
+  --shadow-lg: 0 18px 48px hsl(262 40% 30% / 0.2);
+  --shadow-glow: 0 20px 60px var(--glow);
+  --overlay: rgba(88, 66, 122, 0.34);
+  --scrollbar: #a68fd0;
+  color-scheme: light;
+}
+
 /* ---------------------------------------------------------------------------
    Type: the two vendored faces.
    Only the latin subsets are shipped for body copy, with latin-ext available for
@@ -703,7 +865,11 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
-  background: var(--page);
+  /* two layers, because they answer two different questions: `--page` is the
+     ground and `--sky` is the light on it (none, for most palettes) */
+  background-color: var(--page);
+  background-image: var(--sky);
+  background-repeat: no-repeat;
   color: var(--text);
   font-family: var(--font-ui);
   font-size: 13px;
@@ -1329,11 +1495,13 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 .swatch-cyan { --sw-page: #00070d; --sw-panel: #001b22; --sw-accent: #18dbfd; --sw-accent-2: #84e7fe; }
 .swatch-ember { --sw-page: #140000; --sw-panel: #261100; --sw-accent: #fc9f11; --sw-accent-2: #feb96b; }
 .swatch-jade { --sw-page: #000902; --sw-panel: #001e10; --sw-accent: #1cfdb0; --sw-accent-2: #acffd6; }
+.swatch-sunset { --sw-page: #0e0528; --sw-panel: #1e0f42; --sw-accent: #ffb02e; --sw-accent-2: #ff2e88; }
 .swatch-lilac { --sw-page: #d1c4fe; --sw-panel: #fdfdff; --sw-accent: #6f08d9; --sw-accent-2: #5d04b8; }
 .swatch-rose { --sw-page: #fdb6d1; --sw-panel: #fffdfd; --sw-accent: #9f045d; --sw-accent-2: #86024d; }
 .swatch-mist { --sw-page: #96d7fe; --sw-panel: #fcfeff; --sw-accent: #025b80; --sw-accent-2: #004b6b; }
 .swatch-bloom { --sw-page: #febc9f; --sw-panel: #fffdfc; --sw-accent: #8e3801; --sw-accent-2: #772e00; }
 .swatch-sage { --sw-page: #98e0bc; --sw-panel: #fbfefd; --sw-accent: #026242; --sw-accent-2: #005135; }
+.swatch-dawn { --sw-page: #e6d9fb; --sw-panel: #fdfcff; --sw-accent: #8a5200; --sw-accent-2: #a3125f; }
 .theme-item .theme-name { flex: 1 1 auto; min-width: 0; text-transform: capitalize; }
 .theme-item .theme-dot { flex: none; width: 12px; text-align: center; color: var(--accent-text); }
 

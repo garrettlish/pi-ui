@@ -102,11 +102,11 @@ SDK instead of bridging RPC is what makes it fast:
 - Queued steering / follow-up messages appear in a dock above the composer and can be undone
   individually or cleared. `Esc` or **Stop** aborts the current run.
 - Model and thinking-level menus honor `enabledModels` from `~/.pi/agent/settings.json`.
-- Ten palettes in a Light / Dark picker — five hue families, each as a dark stage and a light page
-  (violet / lilac, magenta / rose, cyan / mist, ember / bloom, jade / sage),
+- Twelve palettes in a Light / Dark picker — six hue families, each as a dark stage and a light page
+  (violet / lilac, magenta / rose, cyan / mist, ember / bloom, jade / sage, sunset / dawn),
   every one a saturated page with a drifting colored glow behind it, a resizable and collapsible
   sidebar, and tool-call state that reads twice over (rail plus worded chip) so it never depends on
-  color alone. All ten are held to a measured 4.5:1 contrast floor by `npm test` — including tertiary
+  color alone. All twelve are held to a measured 4.5:1 contrast floor by `npm test` — including tertiary
   metadata over the glow at its brightest, which is what sets each polarity's light budget — the two
   faces are vendored so the UI keeps its typography offline, and the sidebar becomes an off-canvas
   drawer below 720px.
