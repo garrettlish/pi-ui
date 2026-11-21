@@ -78,8 +78,9 @@
   /* a table header band: one step away from a card body, because the band has
      to read as a band. */
   --table-head: #3d2d63;
-  /* the floating functional layer: toolbar, sidebar, composer, popovers */
-  --glass: rgba(27, 12, 54, 0.78);
+  /* the floating functional layer (toolbar, sidebar, composer, popovers) is not
+     a token here: it is mixed from --surface/--accent by the material block
+     below, so every palette gets the same glass without a per-palette fix. */
   --border: #4a3874;
   --border-strong: #785abd;
 
@@ -145,6 +146,73 @@
 
   --scrollbar: #7359b1;
 
+  /* ---- material ----------------------------------------------------------
+     One glass recipe for every floating surface, so the sidebar, the toolbar,
+     the dock, a menu and a dialog are the same material at different sizes.
+     Nothing here is a colour of its own: the fill is mixed from --surface and
+     the light on the edge from --accent-tint-border, which is why a palette
+     only has to name its stage and its accent and the glass follows.
+
+     The fill is deliberately a gradient and not one alpha: real glass is
+     thicker at the bottom, so the top of a panel is the most transparent part
+     and the bottom settles onto the page. The saturation/brightness on the
+     backdrop-filter is what makes the colour behind it show through as colour
+     rather than as a washed-out grey — frost, not fog.
+
+     --glass-top/--glass-bottom are the two inset hairlines: a lit edge on top
+     and a shadowed one below. They are the whole difference between "a panel
+     with a border" and "a pane with thickness", and they flip with polarity
+     (see the light block below the palettes), never per component. */
+  --glass-blur: 34px;
+  --glass-sat: 185%;
+  --glass-bright: 1.06;
+  --glass-fill: linear-gradient(
+    158deg,
+    color-mix(in oklab, var(--surface) 80%, transparent) 0%,
+    color-mix(in oklab, var(--surface) 62%, transparent) 54%,
+    color-mix(in oklab, var(--surface) 72%, transparent) 100%
+  );
+  --glass-top: rgba(255, 255, 255, 0.16);
+  --glass-bottom: rgba(0, 0, 0, 0.34);
+  --glass-inset: inset 0 1px 0 var(--glass-top), inset 0 -1px 0 var(--glass-bottom);
+  --glass-edge: color-mix(in oklab, var(--accent-tint-border) 46%, transparent);
+  --glass-edge-soft: color-mix(in oklab, var(--border-strong) 42%, transparent);
+  /* a pane floats, so its shadow is two: a contact shadow that grounds it and a
+     wide, dark one that separates it from the stage without a glow */
+  --glass-shadow: 0 1px 2px rgba(0, 0, 0, 0.34), 0 26px 60px -30px rgba(0, 0, 0, 0.9);
+  /* the specular band across the top of a glossy control, and the sheen laid
+     over a filled gradient. Both are white-on-light in either polarity. */
+  --specular: linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0) 48%);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0) 42%);
+  /* grain: the one texture in the UI. A perfectly smooth gradient is what makes
+     a dark stage read as a CSS demo; 4% noise is enough to make it read as a
+     material, and it is a layer over the stage rather than an image so it costs
+     no request and never scales with the window. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='128' height='128' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E");
+  --grain-opacity: 0.05;
+  /* the vignette is polarity-aware for the same reason the ambient budget is:
+     on a dark stage it deepens the corners (and only helps light text), while
+     on a light page a dark wash would eat dark text's contrast, so it is a
+     near-nothing there. */
+  --vignette: radial-gradient(120% 92% at 50% -6%, transparent 54%, rgba(0, 0, 0, 0.32));
+  /* the aurora is the stage's colour, one step more saturated than the ambient
+     blobs and placed behind the chrome rather than behind prose. `screen` is
+     what makes two overlapping lights read as light; the light palettes switch
+     it off, because screen over paper only bleaches. */
+  --aurora-opacity: 0.9;
+  --aurora-blend: screen;
+  /* the empty screen's halo is the one place stage colour is allowed to come
+     forward into the reading column, because there is no prose yet. Dark can
+     afford a strong bloom; paper cannot (the same two gradients over a pale
+     page turn into a highlighter), so the light block dials them down hard. */
+  --halo-a: 24%;
+  --halo-b: 14%;
+
+  /* motion: one decelerating curve and one overshoot, used by everything that
+     moves. The overshoot is reserved for controls that answer a press. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+
   /* type: a geometric display face for headings and chrome, a neutral one for
      prose. Inter carries the reading surface because it is drawn for screens at
      small sizes; Space Grotesk carries the things that should have a voice.
@@ -188,7 +256,6 @@
   --elevated: #48132c;
   --code: #050001;
   --table-head: #5c213c;
-  --glass: rgba(48, 2, 25, 0.78);
   --border: #6c2a48;
   --border-strong: #b04374;
 
@@ -238,7 +305,6 @@
   --elevated: #00303a;
   --code: #000105;
   --table-head: #00414d;
-  --glass: rgba(0, 27, 34, 0.78);
   --border: #004e5c;
   --border-strong: #077e93;
 
@@ -290,7 +356,6 @@
   --elevated: #3f2300;
   --code: #040000;
   --table-head: #533000;
-  --glass: rgba(38, 17, 0, 0.78);
   --border: #633b00;
   --border-strong: #9c6104;
 
@@ -343,7 +408,6 @@
   --elevated: #003420;
   --code: #000200;
   --table-head: #00452d;
-  --glass: rgba(0, 30, 16, 0.78);
   --border: #005337;
   --border-strong: #07855a;
 
@@ -405,7 +469,6 @@
   --elevated: #3a2470;
   --code: #08011a;
   --table-head: #462d7c;
-  --glass: rgba(36, 19, 80, 0.78);
   --border: #553c90;
   --border-strong: #9469e2;
 
@@ -490,7 +553,6 @@
   --elevated: #eee9ff;
   --code: #e9e4ff;
   --table-head: #cec0fe;
-  --glass: rgba(253, 253, 255, 0.8);
   --border: #a391d9;
   --border-strong: #7956c4;
 
@@ -539,7 +601,6 @@
   --elevated: #ffe5ee;
   --code: #ffdee9;
   --table-head: #feb0ce;
-  --glass: rgba(255, 253, 253, 0.8);
   --border: #d282a2;
   --border-strong: #b53c75;
 
@@ -588,7 +649,6 @@
   --elevated: #daf1ff;
   --code: #d0edff;
   --table-head: #8ed5fe;
-  --glass: rgba(252, 254, 255, 0.8);
   --border: #55a9d6;
   --border-strong: #0679a9;
 
@@ -642,7 +702,6 @@
   --elevated: #ffe7dd;
   --code: #ffe1d4;
   --table-head: #feb898;
-  --glass: rgba(255, 253, 252, 0.8);
   --border: #d58966;
   --border-strong: #b54b04;
 
@@ -693,7 +752,6 @@
   --elevated: #d9f5e6;
   --code: #d1f1e0;
   --table-head: #8cdfb7;
-  --glass: rgba(251, 254, 253, 0.8);
   --border: #5bb38a;
   --border-strong: #07855a;
 
@@ -756,7 +814,6 @@
   --elevated: #f3ecff;
   --code: #eee6ff;
   --table-head: #dbcefa;
-  --glass: rgba(253, 252, 255, 0.8);
   --border: #b09cdd;
   --border-strong: #7a55c2;
 
@@ -807,6 +864,46 @@
   --overlay: rgba(88, 66, 122, 0.34);
   --scrollbar: #a68fd0;
   color-scheme: light;
+}
+
+/* ---------------------------------------------------------------------------
+   The glass in daylight.
+
+   Only the material changes here — no page, ink or accent token is touched, so
+   the twelve palettes' contrast contracts are exactly the ones the test fits.
+   Glass over paper behaves the other way round from glass over a dark stage: the
+   pane is bright and the *underside* carries the shadow, so the two inset
+   hairlines swap weights and the fill leans on white rather than on --surface.
+   `screen` would bleach a light page, so the aurora falls back to `normal` and
+   drops its opacity; the vignette nearly disappears for the same reason.
+--------------------------------------------------------------------------- */
+:root[data-theme="lilac"],
+:root[data-theme="rose"],
+:root[data-theme="mist"],
+:root[data-theme="bloom"],
+:root[data-theme="sage"],
+:root[data-theme="dawn"] {
+  --glass-fill: linear-gradient(
+    158deg,
+    color-mix(in oklab, var(--surface) 94%, transparent) 0%,
+    color-mix(in oklab, var(--surface) 80%, transparent) 54%,
+    color-mix(in oklab, var(--surface) 90%, transparent) 100%
+  );
+  --glass-top: rgba(255, 255, 255, 0.95);
+  --glass-bottom: rgba(70, 48, 104, 0.1);
+  --glass-edge: color-mix(in oklab, var(--accent-tint-border) 38%, transparent);
+  --glass-edge-soft: color-mix(in oklab, var(--border-strong) 30%, transparent);
+  --glass-sat: 150%;
+  --glass-bright: 1.02;
+  --glass-shadow: 0 1px 2px rgba(70, 48, 104, 0.08), 0 26px 54px -30px rgba(70, 48, 104, 0.42);
+  --specular: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 50%);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0) 45%);
+  --grain-opacity: 0.028;
+  --vignette: radial-gradient(120% 92% at 50% -6%, transparent 62%, rgba(58, 38, 88, 0.1));
+  --aurora-opacity: 0.5;
+  --aurora-blend: normal;
+  --halo-a: 9%;
+  --halo-b: 5%;
 }
 
 /* ---------------------------------------------------------------------------
@@ -865,10 +962,12 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
-  /* two layers, because they answer two different questions: `--page` is the
-     ground and `--sky` is the light on it (none, for most palettes) */
+  /* three layers, because they answer three different questions: `--page` is
+     the ground, `--sky` is the light on it (none, for most palettes) and
+     `--vignette` is the fall-off at the corners that keeps a bright aurora from
+     ending in a flat rectangle */
   background-color: var(--page);
-  background-image: var(--sky);
+  background-image: var(--sky), var(--vignette);
   background-repeat: no-repeat;
   color: var(--text);
   font-family: var(--font-ui);
@@ -879,7 +978,15 @@ body {
   /* the stage is near black, so the caret and the selection are the two pieces
      of browser furniture that would otherwise ship in a color from no palette */
   caret-color: var(--accent-hover);
+  /* Inter ships alternate glyphs for exactly this: a slightly wider l, a
+     tailed a and a disambiguated zero. On a UI that prints paths and ids all
+     day, those three are the difference between a face and the system font. */
+  font-feature-settings: "cv05" 1, "cv08" 1, "cv11" 1;
 }
+
+/* selection is a solid accent plate: --accent-ink on --accent is one of the
+   pairs the palette test already covers, so it cannot drift below the floor in
+   any of the twelve moods */
 ::selection {
   background: var(--accent);
   color: var(--accent-ink);
@@ -889,6 +996,91 @@ body {
 .spacer { flex: 1; }
 
 #app { display: flex; height: 100vh; position: relative; z-index: 1; }
+
+/* ---------------------------------------------------------------------------
+   Stage: aurora, grain
+
+   Three aurora lights behind everything, plus one grain layer over the stage.
+   They are separate from the `--ambient-*` blobs below on purpose: those are
+   the lights that drift *under prose*, and their alpha is the ceiling the
+   contrast test fits. These sit behind the chrome and the floating panes — the
+   glass is what shows them — so they can be far more saturated without any
+   paragraph ever being read against them. On a light page the same lights drop
+   their `screen` blend and most of their alpha, because light over paper is a
+   stain rather than a glow.
+
+   The grain is a single repeating 128px tile with no request: it is the
+   difference between a gradient and a surface, and it is deliberately laid
+   under the app rather than over it so it never sits between the reader and a
+   glyph.
+--------------------------------------------------------------------------- */
+#stage {
+  /* deliberately *not* z-indexed: a stacking context would isolate the aurora's
+     `screen` blend from the page underneath, and screen against transparency is
+     no blend at all. DOM order already puts it behind #app (which is z-index 1). */
+  position: fixed; inset: 0;
+  pointer-events: none; overflow: hidden;
+}
+.aurora {
+  position: absolute; display: block;
+  border-radius: 50%;
+  filter: blur(56px) saturate(160%);
+  opacity: var(--aurora-opacity);
+  mix-blend-mode: var(--aurora-blend);
+  will-change: transform;
+}
+/* the primary light: the palette's own gradient, parked above the toolbar so
+   the frosted chrome is always reading a coloured backdrop */
+.aurora-a {
+  top: -40vh; left: -6vw; width: 80vmax; height: 74vmax;
+  background: radial-gradient(closest-side,
+    color-mix(in oklab, var(--grad-a) 96%, transparent),
+    color-mix(in oklab, var(--grad-a) 34%, transparent) 46%,
+    transparent 72%);
+  animation: aurora-drift-a 132s ease-in-out infinite alternate;
+}
+/* the far light: the palette's second hue. It sits low and right, which is
+   where the dock and the bottom of the sidebar catch it. */
+.aurora-b {
+  right: -20vmax; bottom: -44vh; width: 74vmax; height: 74vmax;
+  background: radial-gradient(closest-side,
+    color-mix(in oklab, var(--grad-c) 92%, transparent),
+    color-mix(in oklab, var(--grad-c) 30%, transparent) 48%,
+    transparent 74%);
+  animation: aurora-drift-b 158s ease-in-out infinite alternate;
+}
+/* a narrow beam through the middle of the stage: the one light that reads as
+   direction rather than as a spot, and what keeps the two large blobs from
+   looking like symmetrical wallpaper */
+.aurora-c {
+  top: 16vh; left: 28vw; width: 48vmax; height: 48vmax;
+  background: radial-gradient(closest-side,
+    color-mix(in oklab, var(--accent) 78%, transparent),
+    color-mix(in oklab, var(--grad-b) 26%, transparent) 50%,
+    transparent 72%);
+  opacity: calc(var(--aurora-opacity) * 0.75);
+  animation: aurora-drift-c 186s ease-in-out infinite alternate;
+}
+#app::before {
+  content: "";
+  position: fixed; inset: 0; z-index: 0;
+  pointer-events: none;
+  background-image: var(--grain);
+  background-size: 128px 128px;
+  opacity: var(--grain-opacity);
+}
+@keyframes aurora-drift-a {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(7vw, 5vh, 0) scale(1.1); }
+}
+@keyframes aurora-drift-b {
+  from { transform: translate3d(0, 0, 0) scale(1.05); }
+  to   { transform: translate3d(-6vw, -6vh, 0) scale(0.96); }
+}
+@keyframes aurora-drift-c {
+  from { transform: translate3d(0, 0, 0) scale(0.9) rotate(0deg); }
+  to   { transform: translate3d(-5vw, 7vh, 0) scale(1.06) rotate(8deg); }
+}
 
 /* ---------------------------------------------------------------------------
    Ambient stage
@@ -1019,23 +1211,35 @@ button {
   appearance: none;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 30px; padding: 5px 13px;
-  background: var(--elevated); color: var(--text);
+  /* a plain control is a small pane too: the fill is the elevated token, and
+     the two inset lines give it the same lit-top / shadowed-bottom thickness
+     the big surfaces have. No blur at this size — a 30px control gains nothing
+     from sampling its backdrop and pays for it on every repaint. */
+  background: color-mix(in oklab, var(--elevated) 88%, transparent);
+  color: var(--text);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
   font-family: var(--font-ui); font-size: 13px; font-weight: 450;
   cursor: pointer;
-  transition: background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-    border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-    color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color 0.18s var(--ease-out),
+    border-color 0.18s var(--ease-out),
+    color 0.18s var(--ease-out),
+    box-shadow 0.18s var(--ease-out),
+    transform 0.18s var(--ease-spring);
 }
-button:hover { background: var(--surface); border-color: var(--border-strong); }
-button:active { transform: translateY(0.5px); }
+button:hover {
+  background: color-mix(in oklab, var(--surface) 92%, transparent);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 6px 18px -12px rgba(0, 0, 0, 0.8);
+}
+button:active { transform: translateY(0); }
 
 button.ghost {
   background: transparent; border-color: transparent; color: var(--text-2);
+  box-shadow: none;
 }
-button.ghost:hover { background: var(--elevated); border-color: transparent; color: var(--text); }
+button.ghost:hover { background: color-mix(in oklab, var(--elevated) 78%, transparent); border-color: transparent; color: var(--text); }
 button.danger { border-color: var(--border); color: var(--danger); }
 button.danger:hover { background: var(--danger-tint); border-color: var(--danger); color: var(--danger); }
 button:disabled { opacity: 0.4; cursor: default; transform: none; }
@@ -1048,11 +1252,13 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   border-radius: var(--radius-sm);
 }
 .icon-btn:hover {
-  background: var(--elevated); border-color: transparent; color: var(--text);
+  background: color-mix(in oklab, var(--elevated) 82%, transparent);
+  border-color: transparent; color: var(--text);
   /* a light, not a shadow: the icon lifts toward the reader. The spread is
      positive and the blur real, so this is a soft halo around a control rather
      than a hairline ring pretending to be depth. */
-  box-shadow: 0 0 0 1px var(--border-strong), 0 2px 14px -2px var(--glow);
+  box-shadow: 0 0 0 1px var(--border-strong), 0 4px 18px -4px var(--glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 .icon-btn:active { background: var(--border); }
 .icon-btn svg { width: 17px; height: 17px; display: block; }
@@ -1075,10 +1281,24 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 #sidebar {
   width: 280px;
   min-width: 220px;
-  background: var(--glass);
-  backdrop-filter: blur(28px) saturate(160%);
-  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  /* the pane: a gradient fill over a saturated blur, two inset hairlines for
+     thickness (--glass-inset) and a hairline border drawn in the palette. This
+     is the whole material; the toolbar and the dock repeat it at a different
+     size rather than inventing a second recipe.
+
+     The radial on top is the one per-surface tint: every other pane is lit by
+     the aurora behind it, but the sidebar's header sits where the stage is
+     darkest, so it gets its own accent bloom. It is a background layer, not an
+     overlay, so it can never sit in front of the logo or the filter. */
+  background:
+    radial-gradient(120% 52% at 14% -10%,
+      color-mix(in oklab, var(--accent) 20%, transparent),
+      transparent 64%),
+    var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
   border-right: 1px solid var(--border);
+  box-shadow: var(--glass-inset);
   display: flex;
   flex-direction: column;
   position: relative;
@@ -1113,8 +1333,18 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   width: 28px; height: 28px; border-radius: var(--radius-sm);
   background-image: linear-gradient(135deg, var(--grad-a), var(--grad-b));
   /* the glow under the mark: the smallest colored shadow on the page, and the
-     one that ties the logo to the primary action */
-  box-shadow: 0 4px 16px -4px var(--glow);
+     one that ties the logo to the primary action. The inset line is the same
+     specular edge every filled control carries — a lit top and a shadowed
+     underside are what make the plate read as a solid object. */
+  box-shadow: 0 4px 16px -4px var(--glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22);
+  position: relative; overflow: hidden;
+}
+.logo-mark::after {
+  content: ""; position: absolute; inset: 0;
+  background: var(--specular);
+  pointer-events: none;
 }
 .logo-mark svg {
   width: 28px; height: 28px; display: block;
@@ -1140,35 +1370,47 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 
 #session-filter {
   margin: 0 12px 10px;
-  min-height: 30px;
-  background: var(--elevated); color: var(--text);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 5px 11px; font-family: var(--font-ui); font-size: 12px;
+  min-height: 32px;
+  /* an input sunk into the glass: the inset shadow is the well, but the fill is
+     mostly --surface so the placeholder's ink is measured against a solid token
+     rather than against whatever bloom is passing underneath the pane */
+  background: color-mix(in oklab, var(--surface) 84%, transparent);
+  color: var(--text);
+  border: 1px solid var(--glass-edge-soft); border-radius: var(--radius-pill);
+  padding: 5px 13px; font-family: var(--font-ui); font-size: 12px;
   outline: none;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out),
+    background-color 0.18s var(--ease-out);
   -webkit-appearance: none; appearance: none;
 }
 #session-filter::placeholder { color: var(--text-3); }
 #session-filter:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-tint), 0 0 22px -6px var(--glow);
+  box-shadow: 0 0 0 3px var(--accent-tint), 0 0 26px -8px var(--glow);
 }
 
 .session-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
 .session-item {
-  padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  padding: 8px 10px; border-radius: var(--radius); cursor: pointer;
   border: 1px solid transparent; margin-bottom: 2px;
-  transition: background-color 0.18s ease, border-color 0.18s ease,
-    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color 0.18s var(--ease-out), border-color 0.18s var(--ease-out),
+    transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out);
 }
-.session-item:hover { background: var(--elevated); }
+.session-item:hover {
+  background: color-mix(in oklab, var(--elevated) 74%, transparent);
+  border-color: var(--glass-edge-soft);
+}
 .session-item.active {
   background: var(--accent-tint);
   border-color: var(--accent-tint-border);
   /* a lit border and a trace of the palette's light, not a bar down one side:
      a one-sided stripe reads as a tab, and the selected row already has the
-     border plus the tint to say which one it is */
-  box-shadow: 0 2px 14px -6px var(--glow), inset 0 0 0 1px var(--accent-tint-border);
+     border plus the tint to say which one it is. The top specular line is what
+     makes the row read as a raised object rather than a painted rectangle. */
+  box-shadow: 0 4px 20px -10px var(--glow),
+    inset 0 0 0 1px var(--accent-tint-border),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 .session-item .s-title {
   display: flex; align-items: flex-start; gap: 6px;
@@ -1233,10 +1475,16 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
    ~240px the labels ellipsize rather than wrap. */
 .sidebar-tabs {
   display: flex; gap: 1px;
-  margin: 0 12px 10px; padding: 2px;
-  background: var(--elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  margin: 0 12px 10px; padding: 3px;
+  /* a recessed track rather than a raised chip: the selected segment should be
+     the thing that looks lit, so the container is a well the segments sit in.
+     It keeps a third of the pane visible (that is what makes it look cut into
+     the glass) but most of its fill is --page, which is a surface the ink was
+     measured against — the bloom behind it never becomes the label's backdrop. */
+  background: color-mix(in oklab, var(--page) 72%, transparent);
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.22);
 }
 #sidebar .sidebar-tabs button {
   flex: 1 1 auto; min-width: 0; min-height: 22px;
@@ -1366,11 +1614,15 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
      under the transcript that follows it. */
   display: flex; align-items: center; gap: var(--space-2);
   position: relative; z-index: 30;
-  padding: 9px 14px;
-  background: var(--glass);
-  backdrop-filter: blur(28px) saturate(160%);
-  -webkit-backdrop-filter: blur(28px) saturate(160%);
-  border-bottom: 1px solid var(--border);
+  padding: 9px 16px;
+  /* the same glass recipe as the sidebar, at toolbar height. Here it is
+     reading the aurora above the fold, which is why the toolbar is the most
+     obviously coloured surface on the page in the default mood. */
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border-bottom: 1px solid var(--glass-edge-soft);
+  box-shadow: var(--glass-inset);
 }
 /* the toolbar's bottom edge is lit in the middle and fades at both ends, so the
    functional layer separates from the stage by light rather than by a rule
@@ -1382,7 +1634,7 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   background: linear-gradient(to right,
     transparent, var(--accent-tint-border) 22%, var(--accent) 50%,
     var(--accent-tint-border) 78%, transparent);
-  opacity: 0.5;
+  opacity: 0.7;
 }
 .topbar-left {
   display: flex; align-items: center; gap: 6px;
@@ -1415,8 +1667,10 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 /* header read-outs: quiet pills; only the context/cost numbers carry a tint */
 .badge {
   flex: 0 1 auto; min-width: 0; padding: 3px 10px;
-  background: var(--elevated); border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--elevated) 86%, transparent);
+  border: 1px solid var(--glass-edge-soft);
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   font-size: 11.5px; color: var(--text-2);
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
@@ -1430,10 +1684,15 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 .picker { position: relative; flex: none; min-width: 0; }
 .picker-btn {
   gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 210px; min-height: 30px;
-  padding: 3px 10px; font-size: 12px;
-  background: var(--elevated); border-color: transparent; color: var(--text);
+  padding: 3px 12px; font-size: 12px;
+  background: color-mix(in oklab, var(--elevated) 82%, transparent);
+  border-color: var(--glass-edge-soft); border-radius: var(--radius-pill);
+  color: var(--text);
 }
-.picker-btn:hover { background: var(--border); color: var(--text); }
+.picker-btn:hover {
+  background: color-mix(in oklab, var(--elevated) 88%, transparent);
+  color: var(--text);
+}
 .picker-btn .picker-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker-btn::after {
   content: ""; flex: none; width: 0; height: 0;
@@ -1444,13 +1703,16 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
   min-width: 190px; max-width: min(360px, 90vw);
   overflow-y: auto; overscroll-behavior: contain;
-  padding: 5px;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  /* the one place a colored shadow earns its keep: a menu floats above the
-     stage, and a plain black shadow would read as a hole cut in the page */
-  box-shadow: var(--shadow-lg), 0 0 40px -12px var(--glow);
+  padding: 6px;
+  /* a real pane: the menu is the one place the glass is seen from underneath a
+     lit edge, so it reads as a sheet lifted off the stage rather than a tooltip */
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top),
+    0 0 40px -14px var(--glow);
   font-size: 12.5px; color: var(--text);
 }
 .picker-group {
@@ -1464,8 +1726,11 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   border: 0; border-radius: var(--radius-xs);
   background: transparent; color: var(--text); text-align: left;
   font-family: var(--font-ui); font-size: 12.5px; cursor: pointer;
+  /* a row in a menu is not a control that lifts: the menu itself is the object,
+     so rows only take the hover fill and never move */
+  box-shadow: none; transform: none;
 }
-.picker-item:hover { background: var(--elevated); border-color: transparent; }
+.picker-item:hover { background: var(--elevated); border-color: transparent; transform: none; box-shadow: none; }
 .picker-item.selected { color: var(--text); font-weight: 600; }
 .picker-item .picker-check { flex: none; width: 12px; color: var(--accent-text); }
 .picker-item .picker-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1502,14 +1767,22 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 .swatch-sage { --sw-page: #98e0bc; --sw-panel: #fbfefd; --sw-accent: #026242; --sw-accent-2: #005135; }
 .swatch-dawn { --sw-page: #e6d9fb; --sw-panel: #fdfcff; --sw-accent: #8a5200; --sw-accent-2: #a3125f; }
 .theme-item .theme-name { flex: 1 1 auto; min-width: 0; text-transform: capitalize; }
-.theme-item .theme-dot { flex: none; width: 12px; text-align: center; color: var(--accent-text); }
+/* the row carries its palette's light in the swatch; the tick repeats that
+   swatch accent so the chosen mood is identifiable by hue, not only by the
+   word next to it. The variables live on the row (set by app.js), so both the
+   swatch and the tick read the same --sw-accent. */
+.theme-item .theme-dot { flex: none; width: 12px; text-align: center; color: var(--sw-accent, var(--accent-text)); }
 
 /* session details popover */
 #session-info-pop {
   position: absolute; top: calc(100% + 8px); left: 0; z-index: 40;
-  width: min(560px, 88vw); padding: 10px 12px;
-  background: var(--surface); border: 1px solid var(--border-strong);
-  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  width: min(560px, 88vw); padding: 12px 14px;
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top);
   font-size: 12px;
 }
 #session-info-pop .info-row { display: flex; gap: 12px; padding: 3px 0; }
@@ -1528,9 +1801,13 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 #prompt-list-pop {
   position: absolute; top: calc(100% + 8px); right: 8px; z-index: 40;
   width: min(560px, 80vw); max-height: 60vh; overflow-y: auto;
-  padding: 5px;
-  background: var(--surface); border: 1px solid var(--border-strong);
-  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  padding: 6px;
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top);
   font-size: 12px;
 }
 #prompt-list-pop .pl-empty { padding: 12px; color: var(--text-3); }
@@ -1604,10 +1881,14 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   display: flex; flex-direction: column;
   position: relative;
   z-index: 2;
-  background: var(--glass);
-  backdrop-filter: blur(28px) saturate(160%);
-  -webkit-backdrop-filter: blur(28px) saturate(160%);
-  border-top: 1px solid var(--border);
+  /* the dock is the same pane as the toolbar, sitting on the aurora's second
+     light instead of its first, which is why the two ends of the column are the
+     two places the palette's colour is allowed to be obvious */
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border-top: 1px solid var(--glass-edge-soft);
+  box-shadow: inset 0 1px 0 var(--glass-top);
 }
 /* same lit edge as the toolbar, mirrored: the dock's top boundary catches the
    palette's light in the middle */
@@ -1618,7 +1899,7 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   background: linear-gradient(to right,
     transparent, var(--accent-tint-border) 22%, var(--accent) 50%,
     var(--accent-tint-border) 78%, transparent);
-  opacity: 0.5;
+  opacity: 0.7;
 }
 #queue-bar, #status-bar {
   margin: 8px 16px 0; padding: 5px 10px;
@@ -1724,10 +2005,13 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   border-radius: var(--radius-sm);
 }
 /* the same live dot the working line uses, one step cooler: this process is
-   running, but it is not the agent working */
+   running, but it is not the agent working. The dot keeps the success hue and
+   gains a halo in the same token, so a leftover process is visible while
+   scanning the dock without turning the row into an alert. */
 .proc-dot {
   flex: none; width: 6px; height: 6px; border-radius: 50%;
   background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 16%, transparent);
 }
 /* the command is the one thing worth reading, so it takes the free space and
    clips there instead of pushing Stop out of the row */
@@ -1791,7 +2075,18 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 /* ---------------------------------------------------------------------------
    Transcript
 --------------------------------------------------------------------------- */
-#transcript-wrap { flex: 1; min-height: 0; position: relative; display: flex; }
+#transcript-wrap {
+  flex: 1; min-height: 0; position: relative; display: flex;
+  /* the reading surface is opaque at every width. The stage is allowed to be as
+     saturated as it likes around the chrome, but it must never be the backdrop
+     for a paragraph — that is both a legibility rule and why the aurora lives
+     in the gutter and behind the panes instead of behind prose. The single
+     exception is the faint surface wash at the top, which is a neutral token,
+     not a light. */
+  background-color: var(--page);
+  background-image: linear-gradient(180deg,
+    color-mix(in oklab, var(--surface) 42%, transparent), transparent 260px);
+}
 /* the transcript fills the window: no max-width column, so there is no dead
    gutter on either side. The gutter is the padding alone, which stays constant
    whether the sidebar is open, dragged, or collapsed. */
@@ -1825,13 +2120,30 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   padding: 24px 24px 72px;
   pointer-events: none;
 }
-.te-body { max-width: 400px; }
+.te-body { max-width: 400px; position: relative; }
+/* the halo: the first screen has no prose to read, so it is the one place the
+   stage's colour may come forward into the content column. It sits *behind*
+   the copy as a soft bloom rather than a card — no pane, no border, nothing that
+   would compete with the first thing the reader types. */
+#transcript-empty .te-body::before {
+  content: "";
+  position: absolute; left: 50%; top: 50%; z-index: -1;
+  width: 560px; height: 560px; max-width: 120vw;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(closest-side,
+    color-mix(in oklab, var(--grad-a) var(--halo-a), transparent),
+    color-mix(in oklab, var(--grad-c) var(--halo-b), transparent) 48%,
+    transparent 72%);
+  filter: blur(18px);
+  pointer-events: none;
+}
 /* the first screen a new session shows: the one place a display heading is
    worth its weight, because there is no conversation yet to be the subject */
 .te-title {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-family: var(--font-display);
-  font-size: 26px; font-weight: 600; letter-spacing: -0.8px; color: var(--text);
+  font-size: 30px; font-weight: 600; letter-spacing: -1.1px; color: var(--text);
   /* on a light palette the heading's gradient would fade the last line toward
      a mid grey, which reads washed out; the fade is a dark-stage device, so it
      is framed out by polarity. `--te-title-ink` is the ink; --text is set by
@@ -1846,12 +2158,13 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   font-size: 13px; line-height: 1.65; color: var(--text-2);
 }
 .te-lede code {
-  padding: 1px 5px; border-radius: var(--radius-xs);
-  background: var(--surface); border: 1px solid var(--border);
+  padding: 2px 6px; border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--surface) 72%, transparent);
+  border: 1px solid var(--glass-edge-soft);
   font-family: var(--mono); font-size: 11.5px; color: var(--text);
   white-space: nowrap;
 }
-.te-tips { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.te-tips { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
 .te-tips li {
   display: flex; align-items: baseline; gap: 10px;
   font-size: 12.5px; color: var(--text-3);
@@ -1861,9 +2174,14 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
    sits next to the words it introduces */
 .te-keys { flex: none; display: flex; gap: 4px; width: 62px; justify-content: flex-end; }
 .te-tips kbd {
-  padding: 1px 5px; min-width: 20px; text-align: center;
-  border: 1px solid var(--border); border-radius: var(--radius-xs);
-  background: var(--surface); color: var(--text-2);
+  padding: 2px 7px; min-width: 22px; text-align: center;
+  border: 1px solid var(--glass-edge-soft); border-radius: var(--radius-sm);
+  /* keycaps are the smallest object in the material family: a lit top edge and
+     a shadowed bottom is enough to make them read as pressable with no icons */
+  background: color-mix(in oklab, var(--surface) 78%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.24);
+  color: var(--text-2);
   font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
 }
 
@@ -1903,14 +2221,21 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 .item-user {
   width: fit-content; max-width: 100%;
   border: 1px solid transparent;
-  border-radius: var(--radius-lg);
-  padding: 11px 15px;
+  border-radius: var(--radius-xl);
+  padding: 12px 17px;
+  /* two fills and a gradient hairline: the upper fill is the reading surface
+     (a touch lighter at the top, which is the same thickness cue the panes use)
+     and the border ramp is the palette's own two lights. The box shadow is the
+     prompt's glow, not a drop shadow — the turn is meant to look lit. */
   background-image:
-    linear-gradient(var(--elevated), var(--elevated)),
+    linear-gradient(160deg,
+      color-mix(in oklab, var(--elevated) 96%, var(--surface)),
+      color-mix(in oklab, var(--elevated) 88%, var(--surface))),
     linear-gradient(135deg, var(--grad-a), var(--grad-c));
   background-origin: border-box;
   background-clip: padding-box, border-box;
-  box-shadow: 0 10px 34px -18px var(--glow), inset 0 1px 0 var(--inset-line);
+  box-shadow: 0 14px 40px -22px var(--glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
   white-space: pre-wrap; word-break: break-word;
   font-size: 13.5px;
 }
@@ -1962,8 +2287,13 @@ details.skill-def[open] > summary { margin-bottom: 6px; }
   letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-3);
 }
 /* the reader's own turn is the one label allowed the palette's light: it marks
-   which side of the conversation this block belongs to before a word is read */
+   which side of the conversation this block belongs to before a word is read.
+   The assistant label takes the palette's second light (--grad-c), which is a
+   different hue from the accent in every family, so the two speakers read apart
+   by label as well as by alignment; a shell turn takes the warning hue. */
 .item-user .who { color: var(--accent-text); }
+.item-assistant .who { color: var(--grad-c); }
+.item-bash .who { color: var(--warning); }
 
 /* One authored entrance, on the thing that actually arrives: a new turn landing
    in the transcript. The prompt is an object placed on the page, so it animates
@@ -2410,15 +2740,29 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
    color alone.
 --------------------------------------------------------------------------- */
 .toolcall {
-  border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--surface); overflow: hidden; position: relative;
-  transition: border-color 0.14s ease, background-color 0.14s ease;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  /* an opaque card, because this one holds command output. What it does share
+     with the glass is the thickness: a specular line at the top and a deeper
+     well at the bottom, so a stack of tool calls reads as stacked objects
+     rather than a run of outlined boxes. */
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22);
+  overflow: hidden; position: relative;
+  transition: border-color 0.18s var(--ease-out),
+    box-shadow 0.18s var(--ease-out),
+    transform 0.18s var(--ease-out);
 }
 .toolcall::before {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
   background: var(--border-strong); pointer-events: none;
 }
-.toolcall:hover { border-color: var(--border-strong); }
+.toolcall:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 10px 28px -20px rgba(0, 0, 0, 0.9);
+}
 .toolcall.running::before { background: var(--warning); }
 .toolcall.error::before { background: var(--danger); }
 /* a fan-out with some failed children is not a failed tool call: it gets the
@@ -2433,6 +2777,28 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
   flex: none; display: inline-flex; align-items: center; justify-content: center;
   width: 16px; color: var(--text-3); font-size: 11px;
 }
+/* The kind chip on a tool row. The glyph is stroked in `currentColor`, so the
+   hue comes from the `.kind-*` class and the tint behind it is mixed from that
+   same hue — no per-kind hex, and all twelve palettes supply the four hues.
+   Shape and hue both encode the kind; the tool name beside it stays the
+   accessible label, so a grayscale or color-blind reader loses nothing. */
+.tc-icon {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: var(--radius-xs);
+  color: var(--text-2);
+  background: color-mix(in oklab, currentColor 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 24%, transparent);
+}
+.tc-icon svg { width: 13px; height: 13px; display: block; }
+.tc-icon.kind-read { color: var(--accent-text); }
+.tc-icon.kind-search { color: var(--grad-c); }
+.tc-icon.kind-exec { color: var(--warning); }
+.tc-icon.kind-edit { color: var(--success); }
+.tc-icon.kind-subagent { color: var(--accent-text); }
+/* A failure outranks the kind: the row already has a danger rail and a worded
+   chip, and the icon joins them rather than staying the one cheerful part of a
+   failed call. */
+.toolcall.error .tc-icon { color: var(--danger); }
 .tc-name {
   flex: none; font-family: var(--mono); font-size: 12.5px; font-weight: 600;
   color: var(--text);
@@ -2500,7 +2866,14 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
    chain, workflow), one row per child carries its live activity, and the popup
    holds the per-child detail. Every state is worded as well as colored, so the
    card survives grayscale. */
-.toolcall.subagent .tc-open-icon { color: var(--accent-text); }
+/* The fan-out icon carries the run's state, not just its kind: queued keeps the
+   accent, running and partial use the warning hue, a settled run turns success
+   and a failed one takes the danger token. The state is still worded in the
+   chip and the child counts, so the hue is a second channel, never the only one. */
+.toolcall.subagent.running .tc-icon,
+.toolcall.subagent.partial .tc-icon { color: var(--warning); }
+.toolcall.subagent.ok .tc-icon { color: var(--success); }
+.toolcall.subagent.error .tc-icon { color: var(--danger); }
 .sa-count {
   flex: none; padding: 1px 8px; font-size: 11px;
   border-radius: var(--radius-pill);
@@ -2731,7 +3104,6 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
 /* a background completion notice is a card like a run, not a grey note: it
    reports work that finished while the reader was somewhere else */
 .toolcall.subagent-notice { cursor: pointer; }
-.toolcall.subagent-notice .tc-open-icon { color: var(--accent-text); }
 .toolcall.subagent-notice .tc-head { cursor: pointer; }
 .toolcall.subagent-notice .sa-child { cursor: default; }
 .toolcall.subagent-notice .sa-child:hover { background: transparent; }
@@ -2789,24 +3161,36 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
    and starts a soft outward glow on focus. That is the whole focus treatment —
    no ring jumping around, no layout shift. */
 .composer-field {
-  padding: 5px 6px 5px 12px;
+  padding: 6px 7px 6px 14px;
   border: 1px solid transparent;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
+  /* the field is a smaller pane set into the dock: a translucent surface (so
+     the dock's colour still moves under it) with the same gradient hairline and
+     a top specular line. It stays more opaque than the dock because this is
+     where the caret lives — a field you type into should be the most readable
+     surface in the composer, not the most transparent one. */
   background-image:
-    linear-gradient(var(--surface), var(--surface)),
+    linear-gradient(color-mix(in oklab, var(--surface) 92%, transparent),
+                    color-mix(in oklab, var(--surface) 86%, transparent)),
     linear-gradient(135deg, var(--border-strong), var(--accent-tint-border));
   background-origin: border-box;
   background-clip: padding-box, border-box;
-  box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), var(--shadow-sm);
+  transition: box-shadow 0.22s var(--ease-out);
 }
 .composer-field:focus-within {
   /* the border gradient is redrawn in the live accent instead of a fixed tint,
-     so the field is literally lit while the reader is typing in it */
+     so the field is literally lit while the reader is typing in it. The outer
+     ring is a soft bloom, not a hard 2px outline. */
   background-image:
-    linear-gradient(var(--surface), var(--surface)),
+    linear-gradient(color-mix(in oklab, var(--surface) 95%, transparent),
+                    color-mix(in oklab, var(--surface) 90%, transparent)),
     linear-gradient(135deg, var(--accent), var(--grad-c));
-  box-shadow: 0 0 0 1px var(--accent-tint), 0 8px 34px -14px var(--glow);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 0 0 1px var(--accent-tint), 0 1px 0 var(--glass-top),
+    0 10px 40px -14px var(--glow);
 }
 #input {
   display: block; width: 100%; max-height: 200px; resize: none;
@@ -2824,9 +3208,13 @@ details.item-thinking > .item-thinking-body { white-space: pre-wrap; }
 .cmd-menu {
   position: absolute; bottom: calc(100% + 8px); left: 16px; z-index: 20;
   width: min(560px, calc(100% - 32px)); max-height: 280px; overflow-y: auto;
-  padding: 5px;
-  background: var(--surface); border: 1px solid var(--border-strong);
-  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  padding: 6px;
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top);
 }
 .cmd-item {
   display: flex; align-items: center; gap: 8px;
@@ -2930,27 +3318,40 @@ body.dropping .composer-field {
    near-black on the same ramp clears 4.7:1 at its darkest stop. The label
    therefore stays legible at every point of the gradient, including mid-hover. */
 #btn-send {
-  flex: none; min-height: 30px; padding: 4px 18px;
+  flex: none; min-height: 32px; padding: 4px 20px;
   background-image: linear-gradient(135deg, var(--grad-a), var(--grad-b));
   background-color: var(--accent);
   border-color: transparent; color: var(--accent-ink);
   font-family: var(--font-display);
   font-weight: 600; font-size: 13px; letter-spacing: -0.1px;
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 18px -6px var(--glow);
-  transition: box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+  border-radius: var(--radius-pill);
+  /* the one glossy object in the UI: a specular band across the top third plus
+     a colored halo at rest. The band is kept above the cap height's centre so
+     it never sits between the eye and the label. */
+  position: relative; overflow: hidden;
+  box-shadow: 0 5px 22px -8px var(--glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+  transition: box-shadow 0.22s var(--ease-out),
+    transform 0.22s var(--ease-spring),
     filter 0.22s ease;
+}
+#btn-send::before {
+  content: ""; position: absolute; inset: 0 0 auto; height: 52%;
+  background: var(--sheen);
+  pointer-events: none;
 }
 #btn-send:hover {
   /* hover brightens the light rather than swapping the fill: the gradient is
      the identity of the button, so it does not jump to a flat color */
   border-color: transparent; color: var(--accent-ink);
-  filter: brightness(1.08);
-  box-shadow: 0 6px 26px -6px var(--glow), 0 2px 8px rgba(0, 0, 0, 0.4);
+  filter: brightness(1.07) saturate(1.05);
+  box-shadow: 0 10px 34px -10px var(--glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 2px 8px rgba(0, 0, 0, 0.4);
   transform: translateY(-1px);
 }
-#btn-send:active { filter: brightness(0.96); transform: translateY(0); }
+#btn-send:active { filter: brightness(0.97); transform: translateY(0) scale(0.985); }
 #btn-send:disabled { opacity: 0.35; box-shadow: none; transform: none; filter: none; }
 
 /* ---------------------------------------------------------------------------
@@ -2967,12 +3368,18 @@ body.dropping .composer-field {
 #modal, #dialog {
   display: flex; flex-direction: column; overflow: hidden;
   width: min(860px, 92vw); max-height: 85vh;
-  background: var(--surface);
-  border: 1px solid var(--border-strong); border-radius: var(--radius-xl);
-  /* a sheet above a dimmed stage: black depth plus the palette's light leaking
-     around the edge, which is what separates it from a plain dark rectangle */
-  box-shadow: var(--shadow-lg), 0 0 80px -24px var(--glow);
-  animation: sheet-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+  /* a sheet above a dimmed stage: the material is the same pane as the toolbar,
+     but with the fill leaning further toward --surface because this one holds
+     payloads and code that are read, not scanned. The palette's light still
+     leaks around the edge; the dimmed backdrop is what it is lighting. */
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top),
+    0 0 80px -24px var(--glow);
+  animation: sheet-in 0.26s var(--ease-out) both;
 }
 @keyframes sheet-in {
   from { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.985); }
@@ -3051,13 +3458,16 @@ body.dropping .composer-field {
 }
 .toast {
   padding: 10px 15px;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-lg), 0 0 40px -16px var(--glow);
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top),
+    0 0 40px -16px var(--glow);
   font-size: 12.5px;
   white-space: pre-wrap; word-break: break-word;
-  animation: toast-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: toast-in 0.3s var(--ease-out) both;
 }
 @keyframes toast-in {
   from { opacity: 0; transform: translate3d(10px, 0, 0); }
@@ -3074,9 +3484,13 @@ body.dropping .composer-field {
   /* shrink to the list: at a fixed 100% height two models sat in an empty
      sheet ~1000 px tall, so the dialog looked broken rather than roomy */
   width: 100%; max-width: 1500px; height: auto; max-height: min(85vh, 1100px);
-  background: var(--surface);
-  border: 1px solid var(--border-strong); border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg), 0 0 80px -24px var(--glow);
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top),
+    0 0 80px -24px var(--glow);
   font-size: 12.5px;
 }
 .res-head {
@@ -3182,10 +3596,13 @@ body.dropping .composer-field {
 #ws-dialog {
   display: flex; flex-direction: column; overflow: hidden;
   width: min(560px, 92vw); height: min(500px, 82vh);
-  background: var(--surface);
-  border: 1px solid var(--border-strong); border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg), 0 0 80px -24px var(--glow);
-  animation: sheet-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge); border-radius: var(--radius-xl);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top),
+    0 0 80px -24px var(--glow);
+  animation: sheet-in 0.26s var(--ease-out) both;
 }
 .ws-dialog-head {
   padding: 12px 18px; font-size: 13px; font-weight: 600;
@@ -3230,9 +3647,12 @@ body.dropping .composer-field {
   display: flex; flex-direction: column; overflow: hidden;
   width: 100%; max-width: 1500px;
   height: 100%; max-height: 1100px;
-  background: var(--surface);
-  border: 1px solid var(--border); border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg);
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge); border-radius: var(--radius-xl);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top),
+    0 0 80px -24px var(--glow);
 }
 .search-head {
   display: flex; align-items: center; gap: 8px; flex: none;
@@ -3394,20 +3814,25 @@ textarea:focus-visible,
    behind the text is exactly the thing they turned off. */
 @media (prefers-reduced-transparency: reduce) {
   #sidebar, #topbar, #composer-dock, .picker-menu, #session-info-pop,
-  #prompt-list-pop, #modal, #dialog, #ws-dialog, #search-dialog, #resources-dialog {
+  #prompt-list-pop, #modal, #dialog, #ws-dialog, #search-dialog, #resources-dialog,
+  .cmd-menu, .toast {
     background: var(--surface);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
   #sidebar { background: var(--surface); }
   #topbar, #composer-dock { background: var(--page); }
-  /* the glows and the grid are transparency in disguise */
-  body::before, body::after, #main::before, #main::after { display: none; }
+  /* the glows and the grid are transparency in disguise; the aurora and the
+     grain are the new stage, and they go with them */
+  body::before, body::after, #main::before, #main::after,
+  #stage, #app::before { display: none; }
+  #transcript-empty .te-body::before { display: none; }
   .composer-field, .item-user {
     background-image: none;
     background-color: var(--elevated);
     border-color: var(--border);
   }
+  .composer-field { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
 /* Increase Contrast: strengthen every hairline and label that carries meaning.
@@ -3548,5 +3973,54 @@ textarea:focus-visible,
   /* reading size, not chrome size: at 390px the body dropped to 13.5px on a
      ~366px measure, which is 2-3 words a line */
   #transcript { font-size: 14px; line-height: 1.62; }
+}
+
+/* ---------------------------------------------------------------------------
+   Floating shell (wide windows only)
+
+   Above the drawer threshold the two columns stop being halves of a full-bleed
+   window and become two panes floating on the stage: a gutter, one radius per
+   pane, one shadow. Nothing about the structure changes — the sidebar is still
+   the sidebar and the resizer still drags the same width — only the 10px around
+   them is now stage instead of page, which is what lets the glass in the
+   sidebar have something coloured to show.
+
+   The reading column stays opaque. `#transcript-wrap` takes --page, so prose is
+   still read against the flat surface the contrast test measures, while the
+   toolbar and dock above and below it are glass and can be as colourful as the
+   aurora behind them. That split is the point: colour lives in the chrome and
+   in the glass, never under a paragraph.
+
+   The grid overlay moves from `fixed` to `absolute` inside the pane: a fixed
+   layer is not clipped by the pane's radius, so it would draw over the gutter
+   and the rounded corner instead of fading out inside it.
+--------------------------------------------------------------------------- */
+@media (min-width: 721px) {
+  #app { padding: 10px; gap: 10px; }
+
+  #resizer { width: 0; background: transparent; }
+  #resizer::before { left: -5px; right: -5px; }
+  #resizer:hover, #resizer.dragging { background: transparent; }
+
+  #sidebar {
+    border: 1px solid var(--glass-edge-soft);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--glass-shadow), var(--glass-inset);
+  }
+  /* the lit right edge was drawn for a full-height column; a rounded pane gets
+     its light from the border and the inset line instead */
+  #sidebar::after { display: none; }
+
+  #main {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--glass-edge-soft);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top);
+  }
+  /* the follow-up page is a second reading surface and needs the same opacity
+     the transcript's wrapper already carries */
+  #followup-view { background: var(--page); }
+  #main::after { position: absolute; inset: 0; }
 }
 

@@ -31,6 +31,15 @@
   </script>
 </head>
 <body>
+  <!-- decorative stage: three palette-tinted lights behind the glass. They are
+       the colour the panes are lit by, so they are markup rather than a
+       hard-coded gradient on body — each one mixes from the live palette
+       tokens and needs no per-theme rule. Purely visual, never focusable. -->
+  <div id="stage" aria-hidden="true">
+    <span class="aurora aurora-a"></span>
+    <span class="aurora aurora-b"></span>
+    <span class="aurora aurora-c"></span>
+  </div>
   <div id="app">
     <aside id="sidebar">
       <div class="sidebar-head">

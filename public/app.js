@@ -1243,6 +1243,58 @@ function argsSummary(call) {
   return "";
 }
 
+/** Tool glyphs for the transcript rows, one shape per kind. They are drawn in
+ *  `currentColor`, so the hue is set by the `.kind-*` class on the wrapper
+ *  (style.css) and every palette supplies it; no icon carries a color of its
+ *  own. Stroke shapes survive at 13px because each one is a single idea — a
+ *  page, a glass, a prompt, a pencil, a fan-out — rather than a detailed pictogram. */
+const TOOL_ICONS = {
+  read: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h4"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6"/><path d="M15.2 15.2 21 21"/></svg>',
+  exec: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="M7 9.5l3.5 3L7 15.5"/><path d="M12.5 15.5H17"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.2-.9L19.6 7.7a2.1 2.1 0 0 0-3-3L5.2 16.1z"/><path d="M14.6 6.7l2.9 2.9"/></svg>',
+  subagent: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="18" cy="18" r="2.2"/><path d="M8.1 11.1l7.8-3.8"/><path d="M8.1 12.9l7.8 3.8"/></svg>',
+  generic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M9 7h8v8"/></svg>',
+};
+/** Tool name -> kind. Names are split on camelCase and punctuation first, so
+ *  `read_file`, `readFile` and `Read` classify alike. Order matters: `write_file`
+ *  is an edit rather than a read, and `web_search` is a search rather than a
+ *  page fetch. Anything unrecognized keeps the arrow and the muted hue — a wrong
+ *  color is worse than no color.
+ *  @type {Array<[string, RegExp]>} */
+const TOOL_KIND_RULES = [
+  ["edit", /(^|_)(edit|write|patch|apply|replace|create|delete|remove|rename|move|mkdir)(_|$)/],
+  ["search", /(^|_)(grep|search|find|glob|query|lookup|fetch|browse|web)(_|$)/],
+  ["exec", /(^|_)(bash|shell|sh|zsh|exec|run|command|terminal|process|kill|spawn)(_|$)/],
+  ["read", /(^|_)(read|cat|view|open|file|files|ls|list|dir|tree|stat|inspect)(_|$)/],
+];
+function toolKind(name) {
+  const n = String(name || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_");
+  if (n === "subagent" || n.startsWith("subagent_")) return "subagent";
+  for (const [kind, re] of TOOL_KIND_RULES) if (re.test(n)) return kind;
+  return "generic";
+}
+/** Parsed-icon cache: a session can hold hundreds of tool rows, and each one
+ *  would otherwise re-parse the same SVG markup. The template is cloned, so
+ *  every row still gets its own element. */
+const TOOL_ICON_TEMPLATES = new Map();
+function toolIcon(name) {
+  const kind = toolKind(name);
+  const markup = TOOL_ICONS[kind] || TOOL_ICONS.generic;
+  let tpl = TOOL_ICON_TEMPLATES.get(markup);
+  if (!tpl) {
+    tpl = document.createElement("template");
+    tpl.innerHTML = markup;
+    TOOL_ICON_TEMPLATES.set(markup, tpl);
+  }
+  const span = el("span", { class: `tc-icon kind-${kind}`, "aria-hidden": "true" });
+  span.append(document.importNode(tpl.content.firstElementChild, true));
+  return span;
+}
+
 function resultText(content) {
   if (!content) return "";
   return content
@@ -2076,9 +2128,12 @@ function renderSubagentCard(call, block) {
   // error accent; a partial failure gets the warning one.
   const allFailed = view.rows.length > 0 && view.failed === view.rows.length;
   const accent = statusText === "error" || allFailed ? "error" : view.failed ? "partial" : "";
+  // `ok` lets the kind icon take the success hue once the run has settled;
+  // queued/running/error already have a class of their own.
+  const settled = statusText === "done" && !view.running && !accent ? "ok" : "";
   const mode = subagentModeLabel(view);
   const card = el("div", {
-    class: `toolcall subagent ${exec.status === "running" || view.running ? "running" : ""} ${accent}`,
+    class: `toolcall subagent ${exec.status === "running" || view.running ? "running" : ""} ${accent} ${settled}`,
     "data-call-id": call.id,
   });
 
@@ -2096,7 +2151,7 @@ function renderSubagentCard(call, block) {
     el(
       "div",
       headOpts,
-      el("span", { class: "tc-open-icon", text: "⧉" }),
+      toolIcon("subagent"),
       el("span", { class: "tc-name", text: "subagent" }),
       saBadge(mode, `mode ${mode}`),
       el("span", { class: "tc-summary", text: subagentHeadline(view) }),
@@ -2564,7 +2619,7 @@ function renderSubagentNotice(item) {
     el(
       "div",
       { class: "tc-head" },
-      el("span", { class: "tc-open-icon", text: "⧉" }),
+      toolIcon("subagent"),
       el("span", { class: "tc-name", text: incremental ? "child settled" : "subagent" }),
       saBadge(incremental ? "workflow child" : "background run", "mode"),
       el("span", { class: "tc-summary", text: runs.length ? runs.map((r) => r.agent).join(", ") : (body.split("\n")[0] || "background run") }),
@@ -2825,7 +2880,7 @@ function renderToolcall(_item, block) {
       el(
         "div",
         headOpts,
-        el("span", { class: "tc-open-icon", text: "✎" }),
+        toolIcon("edit"),
         el("span", { class: "tc-name", text: "edit" }),
         el("span", { class: "tc-summary", text: base, title: filePath }),
         stats ? el("span", { class: "tc-stat add", text: `+${stats.added}` }) : null,
@@ -2845,7 +2900,7 @@ function renderToolcall(_item, block) {
   const head = el(
     "div",
     headOpts,
-    el("span", { class: "tc-open-icon", text: "↗" }),
+    toolIcon(call.name),
     el("span", { class: "tc-name", text: call.name }),
     el("span", { class: "tc-summary", text: summary }),
     exec.durationMs != null
@@ -3308,7 +3363,7 @@ function renderItem(item) {
           onclick: open,
           onkeydown: onActivate(open),
         },
-        el("span", { class: "tc-open-icon", text: "↗" }),
+        toolIcon(m.toolName),
         el("span", { class: "tc-name", text: m.toolName }),
         el("span", { class: "tc-summary", text: "(orphaned tool result)" }),
         el("span", { class: `tc-status ${statusText}`, text: statusText })
@@ -7921,13 +7976,13 @@ function renderThemePicker(current) {
         el(
           "button",
           {
-            class: `picker-item theme-item${isCurrent ? " selected" : ""}`,
+            class: `picker-item theme-item swatch-${name}${isCurrent ? " selected" : ""}`,
             role: "option",
             "aria-selected": String(isCurrent),
             "data-theme-name": name,
             onclick: () => applyTheme(name),
           },
-          el("span", { class: `theme-swatch swatch-${name}`, "aria-hidden": "true" }),
+          el("span", { class: "theme-swatch", "aria-hidden": "true" }),
           el("span", { class: "theme-name", text: name }),
           el("span", { class: "theme-dot", text: isCurrent ? "✓" : "" })
         )
