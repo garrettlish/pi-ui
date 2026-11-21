@@ -6274,38 +6274,58 @@ async function refreshMeta() {
 // spawn, so a late registration can land between two early identical polls —
 // a third poll after an unchanged gap must also see no change. A token guards
 // against overlapping loops if loadModels is called again mid-retry.
-let loadModelsToken = 0;
+let loadModelsInflight = null;
+let loadModelsRetry = false;
 function modelInList(m) {
   return !!m && state.models.some((x) => x.provider === m.provider && x.id === m.id);
 }
 function sameModel(a, b) {
   return !!a && !!b && a.provider === b.provider && a.id === b.id;
 }
+/** Poll the model list until it stops changing, then publish it.
+ *
+ *  Coalesced: a call made while a loop is already polling joins that loop
+ *  instead of starting a second one. Two loops race to commit snapshots, and
+ *  whichever is superseded can freeze a list captured while a provider was
+ *  still registering — which is exactly how a provider that *is* available
+ *  went missing from the picker. `retry` is sticky for the same reason: a
+ *  one-shot top-up arriving mid-retry must not shorten the poll.
+ *
+ *  Only stability ends the loop — never the current model showing up. A list
+ *  that already contains the running model is not necessarily complete (the
+ *  snapshot is rebuilt from every provider at once, so it can hold one
+ *  provider's final set while another still reports a placeholder), and
+ *  stopping on it is what published that half-built list. */
 async function loadModels({ retry = false } = {}) {
-  const token = ++loadModelsToken;
-  let prevSig = null;
-  let stableStreak = 0; // consecutive polls that returned the same model set
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const res = await cmd("get_available_models");
-      state.models = res.data?.models || [];
-    } catch {}
-    renderHeader();
-    const sig = state.models.map((m) => `${m.provider}/${m.id}`).sort().join("|");
-    if (retry && sig && sig === prevSig) stableStreak++;
-    else stableStreak = 0;
-    prevSig = sig;
-    const stable = stableStreak >= 2; // three identical polls in a row
-    const done =
-      !retry ||
-      token !== loadModelsToken ||
-      (state.models.length && (modelInList(state.model) || stable)) ||
-      attempt >= 12;
-    if (done) break;
-    await new Promise((r) => setTimeout(r, 2500));
-  }
-  // the resources panel may be open on the model list this just filled in
-  if (!resourcesOverlay.classList.contains("hidden") && resTab === "models") renderResources();
+  if (retry) loadModelsRetry = true;
+  if (loadModelsInflight) return loadModelsInflight;
+  loadModelsInflight = (async () => {
+    let prevSig = null;
+    let stableStreak = 0; // consecutive polls that returned the same model set
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await cmd("get_available_models");
+        state.models = res.data?.models || [];
+      } catch {}
+      renderHeader();
+      const sig = state.models.map((m) => `${m.provider}/${m.id}`).sort().join("|");
+      // The stability streak only advances while a retry is wanted; every poll
+      // still counts toward it, so joining a running loop cannot discard it.
+      if (loadModelsRetry && sig && sig === prevSig) stableStreak++;
+      else stableStreak = 0;
+      prevSig = sig;
+      const stable = stableStreak >= 2; // three identical polls in a row
+      const done = !loadModelsRetry || (state.models.length && stable) || attempt >= 12;
+      if (done) break;
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+    loadModelsRetry = false;
+    // the resources panel may be open on the model list this just filled in
+    if (!resourcesOverlay.classList.contains("hidden") && resTab === "models") renderResources();
+  })().finally(() => {
+    loadModelsInflight = null;
+  });
+  return loadModelsInflight;
 }
 
 /** pi's get_commands lists every discoverable command (extension commands,
