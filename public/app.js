@@ -3478,46 +3478,176 @@ function updateEmptyState() {
   target.title = ws;
 }
 
+/** Above this many fresh nodes a render is sliced across animation frames.
+ *
+ *  A cold open builds every node in one task: measured on this machine, ~140 ms
+ *  for a 1,802-item session and ~425 ms for a 4,502-item one, with Markdown
+ *  (39/102 ms) and Prism (27/78 ms) inside it. During that task the page cannot
+ *  paint a frame or accept a keystroke — the tab is simply frozen. Below the
+ *  threshold the synchronous path is cheaper than the scheduling overhead, and
+ *  it is the path every streaming update takes. */
+const BULK_RENDER_MIN = 600;
+/** Items built per frame while slicing: ~12-20 ms of work, one frame's budget. */
+const BULK_RENDER_CHUNK = 240;
+/** The sliced build in flight — { items, from, restoreTop } — or null. */
+let bulkRender = null;
+/** A render requested while a sliced build ran, replayed when it finishes. */
+let bulkPending = null;
+
+/** One item's node, rebuilt only when the item is dirty or was never rendered.
+ *  The entrance animation is consumed here so every caller — the synchronous
+ *  render and the sliced one — gives it exactly once. */
+function itemNode(item) {
+  const node = renderItem(item);
+  // A turn is given the entrance animation once, on the paint that puts it on
+  // the page, and the flag is consumed here so every later rebuild of the same
+  // turn draws it already-shown. Keying the animation to the class the element
+  // is born with (rather than to `item.kind`) is what makes a row that is
+  // rebuilt on every streaming delta appear instantly instead of flickering
+  // from `opacity: 0`. See `.item-enter` in style.css.
+  if (item.enter) {
+    node.classList.add("item-enter");
+    item.enter = false;
+    // Drop the class when the entrance finishes. Leaving it on would replay the
+    // animation every time the node is re-inserted — switching away and back
+    // reuses cached nodes and therefore re-appends them, so a whole visited
+    // transcript would flash again on the way in. `event.target` is checked
+    // because nested animated blocks (a thinking body, a toast) bubble their
+    // own `animationend` here.
+    node.addEventListener(
+      "animationend",
+      (e) => {
+        if (e.target === node) node.classList.remove("item-enter");
+      },
+      { once: true }
+    );
+  }
+  item.node = node;
+  item.dirty = false;
+  return node;
+}
+
+/** Build a cold transcript from the bottom up, one frame at a time.
+ *
+ *  The newest message is what the view opens on, so the tail is built and
+ *  painted first; older history is prepended above it in later frames. Slicing
+ *  keeps every task to a frame, so scrolling and typing stay live while a long
+ *  session loads, and the reader sees the end of the conversation immediately
+ *  instead of a placeholder until the whole history is ready. */
+function startBulkRender({ follow, nearBottom }) {
+  const items = state.items;
+  const me = { items, from: items.length, restoreTop: null };
+  bulkRender = me;
+  const tailFrom = Math.max(0, items.length - BULK_RENDER_CHUNK);
+  const nodes = [];
+  for (let i = tailFrom; i < items.length; i++) nodes.push(itemNode(items[i]));
+  transcriptEl.replaceChildren(...nodes);
+  me.from = tailFrom;
+  if (follow && nearBottom) scrollBottom();
+  requestAnimationFrame(() => bulkRenderStep(me));
+}
+
+/** One frame of older history. Returns false once the build is done or was
+ *  superseded by a different transcript. */
+function bulkRenderStep(me) {
+  if (bulkRender !== me) return false;
+  if (state.items !== me.items) {
+    // The transcript was replaced under us (a switch, a new session). Drop the
+    // stale build; the render that replaced it queued one pass for the end.
+    abandonBulkRender();
+    return false;
+  }
+  if (me.from === 0) {
+    finishBulkRender(me);
+    return false;
+  }
+  const to = me.from;
+  const from = Math.max(0, to - BULK_RENDER_CHUNK);
+  const frag = document.createDocumentFragment();
+  for (let i = from; i < to; i++) frag.append(itemNode(me.items[i]));
+  const before = transcriptEl.scrollHeight;
+  transcriptEl.prepend(frag);
+  me.from = from;
+  // Prepending grows the transcript above the reader. Move the offset by the
+  // same amount so the line they were reading stays put instead of sliding down
+  // by the height of a frame's worth of history.
+  const grew = transcriptEl.scrollHeight - before;
+  if (grew > 0) {
+    transcriptEl.scrollTop += grew;
+    pinnedTop = transcriptEl.scrollTop;
+  }
+  requestAnimationFrame(() => bulkRenderStep(me));
+  return true;
+}
+
+function abandonBulkRender() {
+  bulkRender = null;
+  if (bulkPending) {
+    const p = bulkPending;
+    bulkPending = null;
+    renderTranscript(p);
+  }
+}
+
+function finishBulkRender(me) {
+  bulkRender = null;
+  // A saved offset can only be restored once the heights above it exist; the
+  // switch recorded it here because there was nothing to scroll to yet.
+  if (me.restoreTop != null) transcriptEl.scrollTop = me.restoreTop;
+  updateJumpButton();
+  syncThinkingToggle();
+  updateEmptyState();
+  hydrateMermaid(transcriptEl, { follow: streamPinned });
+  if (bulkPending) {
+    const p = bulkPending;
+    bulkPending = null;
+    renderTranscript(p);
+  }
+}
+
+/** Finish a sliced build synchronously. Used by the jump targets, which need
+ *  the node they are about to scroll to before the build would have reached it. */
+function flushBulkRender() {
+  while (bulkRender) {
+    const me = bulkRender;
+    const progressed = bulkRenderStep(me);
+    // A step may hand off to a build that was queued behind it (a render that
+    // arrived while the old one ran) — keep going for the new one.
+    if (bulkRender === me && !progressed) break;
+  }
+}
+
 function renderTranscript({ follow = true } = {}) {
+  // A sliced build owns the transcript until it finishes. A render arriving
+  // meanwhile (a live event, a late follow-up) is coalesced into one pass at
+  // the end instead of fighting it for the same children — unless it belongs to
+  // a different transcript, which needs the DOM now, so the old build is dead.
+  if (bulkRender) {
+    if (state.items === bulkRender.items) {
+      bulkPending = { follow };
+      return;
+    }
+    bulkRender = null;
+    bulkPending = null;
+  }
+  // Before any node is replaced: a block the reader expanded lives only in the
+  // DOM until its `toggle` runs, and this render is what would throw it away.
+  captureThinkingState();
   const nearBottom = transcriptAtBottom();
   // A reader who scrolled up during a stream must not be dragged back by the
   // next delta (which no longer goes through this function at all, see
   // applyStreamDelta), and must resume following once they return to the
   // bottom. Measured here, before this render changes the height.
   streamPinned = nearBottom;
-  // Before any node is replaced: a block the reader expanded lives only in the
-  // DOM until its `toggle` runs, and this render is what would throw it away.
-  captureThinkingState();
+  let fresh = 0;
+  for (const item of state.items) if (!item.node || item.dirty) fresh++;
+  if (fresh >= BULK_RENDER_MIN) {
+    startBulkRender({ follow, nearBottom });
+    return;
+  }
   const nodes = [];
   for (const item of state.items) {
-    if (!item.node || item.dirty) {
-      const node = renderItem(item);
-      // A turn is given the entrance animation once, on the paint that puts it
-      // on the page, and the flag is consumed here so every later rebuild of
-      // the same turn draws it already-shown. Keying the animation to the class
-      // the element is born with (rather than to `item.kind`) is what makes a
-      // row that is rebuilt on every streaming delta appear instantly instead
-      // of flickering from `opacity: 0`. See `.item-enter` in style.css.
-      if (item.enter) {
-        node.classList.add("item-enter");
-        item.enter = false;
-        // Drop the class when the entrance finishes. Leaving it on would replay
-        // the animation every time the node is re-inserted — switching away and
-        // back reuses cached nodes and therefore re-appends them, so a whole
-        // visited transcript would flash again on the way in. `event.target` is
-        // checked because nested animated blocks (a thinking body, a toast)
-        // bubble their own `animationend` here.
-        node.addEventListener(
-          "animationend",
-          (e) => {
-            if (e.target === node) node.classList.remove("item-enter");
-          },
-          { once: true }
-        );
-      }
-      item.node = node;
-      item.dirty = false;
-    }
+    if (!item.node || item.dirty) itemNode(item);
     nodes.push(item.node);
   }
   // Reconcile children against `state.items`.
@@ -3541,8 +3671,12 @@ function renderTranscript({ follow = true } = {}) {
     else transcriptEl.append(want);
   }
   // Removals run tail-first: an item that left the branch takes its node with
-  // it, and only the surplus beyond the item list is actually surplus.
-  while (transcriptEl.children.length > nodes.length) transcriptEl.lastElementChild.remove();
+  // it, and only the surplus beyond the item list is actually surplus. The
+  // empty case is the one exception: a switch out of a long session drops
+  // thousands of nodes, and replaceChildren() detaches them in one operation
+  // instead of paying a remove() per node.
+  if (!nodes.length) transcriptEl.replaceChildren();
+  else while (transcriptEl.children.length > nodes.length) transcriptEl.lastElementChild.remove();
   // auto-follow the bottom is for streaming content only — a re-render must not
   // fling a user who has scrolled up back to the bottom
   if (follow && nearBottom) scrollBottom();
@@ -4117,8 +4251,8 @@ function renderPromptList() {
 function scrollToUserPrompt(item) {
   // Reconcile first, like scrollToSummary does: assigning a freshly built node
   // here left `item.node` outside the DOM, so `isConnected` failed and the click
-  // did nothing at all. renderTranscript replaces the node in place (1:1), which
-  // is what a jump needs when the item is dirty.
+  // did nothing. Finish a sliced build first: older items have no node yet.
+  flushBulkRender();
   if (item.dirty || !item.node || !item.node.isConnected) renderTranscript({ follow: false });
   const node = item.node;
   if (!node || !node.isConnected) return;
@@ -4132,6 +4266,7 @@ function scrollToSummary(summary) {
   const item = summary.item;
   // reconcile first when the turn is unsaved or not yet in the DOM, so the
   // block index below refers to the nodes actually on screen
+  flushBulkRender();
   if (item.dirty || !item.node || !item.node.isConnected) renderTranscript({ follow: false });
   const box = item.node;
   if (!box || !box.isConnected) return;
@@ -5897,6 +6032,8 @@ function findOccurrence(hit) {
 
 async function revealOccurrence(hit) {
   let found = findOccurrence(hit);
+  // a sliced build may not have reached the target yet
+  flushBulkRender();
   if (!found && !state.isStreaming) {
     // the cached view may predate the entry (or a compaction moved the branch).
     // Skipped while streaming: refresh() rebuilds from persisted entries and a
@@ -6312,7 +6449,11 @@ function restoreScroll(file) {
     return;
   }
   if (saved.atBottom) scrollBottom();
-  else transcriptEl.scrollTop = saved.top;
+  else if (bulkRender && bulkRender.items === state.items) {
+    // The history above the saved offset is still being built, so there is no
+    // height to land on yet. The build applies the offset when it finishes.
+    bulkRender.restoreTop = saved.top;
+  } else transcriptEl.scrollTop = saved.top;
   updateJumpButton();
 }
 
