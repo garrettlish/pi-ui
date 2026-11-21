@@ -1057,13 +1057,14 @@ function attachToolResult(m) {
 }
 
 /** A transcript item. The union covers every `kind` `renderItem` switches on;
- *  the fields with no per-kind meaning (`node`, `dirty`, `_live`, `_stream`,
- *  `_rawMessage`) are the view's own bookkeeping and exist on all of them.
+ *  the fields with no per-kind meaning (`node`, `dirty`, `_live`, `enter`,
+ *  `_stream`, `_rawMessage`) are the view's own bookkeeping and exist on all of
+ *  them.
  *
  *  @typedef {{ kind: string, text?: string, title?: string, message?: any,
  *              ts?: number, data?: any, entry?: any, images?: any[], files?: any[],
  *              blocks?: any[], meta?: any, streaming?: boolean,
- *              node?: Node, dirty?: boolean, _live?: boolean,
+ *              node?: Node, dirty?: boolean, _live?: boolean, enter?: boolean,
  *              _rawMessage?: any, _stream?: Map<number, any>, [k: string]: any }} Item */
 
 /** Build transcript items from ordered session entries (active branch).
@@ -3435,7 +3436,31 @@ function renderTranscript({ follow = true } = {}) {
   const nodes = [];
   for (const item of state.items) {
     if (!item.node || item.dirty) {
-      item.node = renderItem(item);
+      const node = renderItem(item);
+      // A turn is given the entrance animation once, on the paint that puts it
+      // on the page, and the flag is consumed here so every later rebuild of
+      // the same turn draws it already-shown. Keying the animation to the class
+      // the element is born with (rather than to `item.kind`) is what makes a
+      // row that is rebuilt on every streaming delta appear instantly instead
+      // of flickering from `opacity: 0`. See `.item-enter` in style.css.
+      if (item.enter) {
+        node.classList.add("item-enter");
+        item.enter = false;
+        // Drop the class when the entrance finishes. Leaving it on would replay
+        // the animation every time the node is re-inserted — switching away and
+        // back reuses cached nodes and therefore re-appends them, so a whole
+        // visited transcript would flash again on the way in. `event.target` is
+        // checked because nested animated blocks (a thinking body, a toast)
+        // bubble their own `animationend` here.
+        node.addEventListener(
+          "animationend",
+          (e) => {
+            if (e.target === node) node.classList.remove("item-enter");
+          },
+          { once: true }
+        );
+      }
+      item.node = node;
       item.dirty = false;
     }
     nodes.push(item.node);
@@ -6635,11 +6660,12 @@ function handleEvent(record) {
       if (m.role === "user") {
         for (const it of buildItemsFromEntries([{ type: "message", message: m }])) {
           it._live = true;
+          it.enter = true;
           it.appendedAt = ++liveSeq;
           state.items.push(it);
         }
       } else if (m.role === "assistant") {
-        const item = { kind: "assistant", blocks: [], streaming: true, meta: null, ts: m.timestamp, _live: true, appendedAt: ++liveSeq };
+        const item = { kind: "assistant", blocks: [], streaming: true, meta: null, ts: m.timestamp, _live: true, enter: true, appendedAt: ++liveSeq };
         state.items.push(item);
         currentAssistant = item;
       } else if (m.role === "toolResult") {
@@ -6653,6 +6679,7 @@ function handleEvent(record) {
       } else {
         for (const it of buildItemsFromEntries([{ type: "message", message: m }])) {
           it._live = true;
+          it.enter = true;
           it.appendedAt = ++liveSeq;
           state.items.push(it);
         }
@@ -6725,6 +6752,7 @@ function handleEvent(record) {
           built.dirty = true;
         } else {
           built.appendedAt = ++liveSeq;
+          built.enter = true;
           state.items.push(built);
         }
         currentAssistant = null;

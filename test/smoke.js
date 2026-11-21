@@ -1078,6 +1078,21 @@ try {
   const css = await (await fetch(`${BASE}/style.css`)).text();
   check("style.css gives rendered links a palette color", css.includes(".assistant-text a {"));
 
+  // The entrance animation belongs to an *arrival*, not to an element. Declared
+  // on `.item-assistant` it replayed on every rebuild, and a running tool call
+  // rebuilds its turn's element on every delta — the newest turn flickered at
+  // near-zero opacity until the run went quiet, then settled. Both halves are
+  // pinned: the animation must not hang off the item classes, and it must be
+  // gated on a flag app.js consumes after the first paint.
+  check(
+    "style.css keeps the entrance animation off the item classes",
+    !/\.item-(user|assistant)\s*\{[^}]*animation:/.test(css) && css.includes(".item-enter { animation: item-in")
+  );
+  check(
+    "app.js plays the entrance once, on the paint that lands a turn",
+    /if \(item\.enter\) \{\s*node\.classList\.add\("item-enter"\);\s*item\.enter = false;/.test(appJs)
+  );
+
   // The palettes promise 4.5:1, and a promise a hand-edited hex cannot keep is
   // worth nothing: the six moods were tuned against these exact pairs, so the
   // ratio is asserted here instead of trusted to the comment in style.css. A
