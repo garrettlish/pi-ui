@@ -60,7 +60,8 @@ SDK instead of bridging RPC is what makes it fast:
   arguments, live execution updates, the final response and a **Raw JSON** toggle. `edit` calls lead
   with a colored, line-numbered diff.
 - Assistant turns carry model, provider, input/output/cache tokens, cost and stop reason. The header
-  tracks context-window usage, session cost and token totals as each message completes.
+  tracks context-window usage as each message completes, and the session's cost and token totals are
+  in its details popover.
 - A prompt outline in the header lists every user prompt in the session; each entry jumps to that
   message, and an indented second row jumps to the answer that concluded that run.
 - Extension UI requests (`select`, `confirm`, `input`, `editor`) surface as real dialogs; `notify`

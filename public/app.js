@@ -3642,9 +3642,6 @@ function renderHeader() {
   ctxEl.title = st
     ? `Context window usage\nused: ${isNaN(cuTokens) ? "—" : fmtNum(cuTokens)} tokens\nmax: ${fmtNum(cuMax)} tokens\npercent: ${isNaN(pct) ? "—" : `${pct.toFixed(2)}%`}`
     : "Context window usage";
-  if (st) {
-    $("#session-cost").textContent = `${fmtCost(st.cost)} · ${fmtTokens(st.tokens?.total)} tok`;
-  } else $("#session-cost").textContent = "—";
   // only rebuild the popover when it is on screen; a hidden one is refreshed
   // on open, so header re-renders stay cheap
   if (!$("#session-info-pop").classList.contains("hidden")) renderSessionInfo();
@@ -6911,7 +6908,7 @@ function scheduleSettledRefresh() {
   }, 250);
 }
 
-// The ctx/cost badges in the header update per assistant message, not only at
+// The ctx badge in the header updates per assistant message, not only at
 // agent_settled — a multi-turn run otherwise shows stale totals until it ends.
 let statsTimer = null;
 function scheduleStatsRefresh() {

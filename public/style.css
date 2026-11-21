@@ -1420,7 +1420,6 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   font-size: 11.5px; color: var(--text-2);
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
-#session-cost { color: var(--text-2); }
 /* the context read-out is the one pill carrying a live number the reader acts
    on, so it gets the accent tint rather than the neutral fill */
 #context-usage { color: var(--accent-text); border-color: var(--accent-tint-border); background: var(--accent-tint); }
@@ -3426,7 +3425,6 @@ textarea:focus-visible,
   #context-usage { display: none; }
 }
 @media (max-width: 940px) {
-  #session-cost { display: none; }
   .topbar-sep { display: none; }
   /* The model name is long ("DeepSeek V4.1 Flash (local vLLM)"). At its 210 px
      max it took the room the title needed, so below this width the label
