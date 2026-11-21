@@ -2456,9 +2456,14 @@ async function boot() {
 
   // Warm the default workspace in the background. A failure here is reported to
   // the operator but must not stop the server: another workspace may still work,
-  // and the error resurfaces per-open instead.
+  // and the error resurfaces per-open instead. The workspace's shared parts are
+  // followed by one session's own services, because those are what `/api/open`
+  // would otherwise build on the first click (new session or first open of a
+  // file that is not running yet). `warmServices` is replaced as workspaces are
+  // used, so this costs one idle runtime, not one per project.
   void sessionHost
     .workspaceFor(CWD)
+    .then(() => sessionHost.warmServices(CWD))
     .then(() => console.log(`[pi-ui] workspace ready: ${CWD}`))
     .catch((err) => console.error(`[pi-ui] workspace warm-up failed for ${CWD}: ${err.message}`));
 

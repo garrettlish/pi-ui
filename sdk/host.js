@@ -456,6 +456,17 @@ export class SessionHost {
     this.workspaces = new Map();
     /** cwd -> in-flight promise, so two tabs opening at once share one build. */
     this.workspacesPending = new Map();
+    /** One pre-built `servicesFor` result, tagged with its cwd: { cwd, promise }.
+     *  Building a session's own services (model runtime + resource loader) is
+     *  the bulk of `/api/open` for a session that is not already running, and
+     *  it does not depend on which session is being opened — only on the cwd.
+     *  Keeping the most recently used workspace's next build in flight turns
+     *  that cost into background work. Replaced rather than accumulated, so a
+     *  server that has seen many projects still holds at most one spare. */
+    this.spareServices = null;
+    /** Keeps the refill off the open's own critical path; see queueWarmServices. */
+    this.warmTimer = null;
+    this.warmTimerCwd = null;
   }
 
   // -------------------------------------------------------------------------
@@ -521,16 +532,68 @@ export class SessionHost {
   async servicesFor(cwd) {
     const resolved = path.resolve(cwd);
     const shared = await this.workspaceFor(resolved);
-    return this.sdk.createAgentSessionServices({
+    const spare = this.spareServices;
+    if (spare && spare.cwd === resolved) {
+      this.spareServices = null;
+      const ready = await spare.promise.catch(() => null);
+      // Refill for the next open.
+      this.queueWarmServices(resolved);
+      if (ready) return ready;
+    }
+    const fresh = await this.sdk.createAgentSessionServices({
       cwd: resolved,
       settingsManager: shared.settingsManager,
     });
+    // A workspace other than the one the spare was built for: move the spare
+    // here, so its second open (and every one after) is warm too.
+    if (!this.spareServices || this.spareServices.cwd !== resolved) this.queueWarmServices(resolved);
+    return fresh;
+  }
+
+  /** Queue the next build behind the commands an open is immediately followed
+   *  by (`get_entries`, `get_state`, `get_session_stats`). Building it inline
+   *  puts ~20 ms of synchronous extension work in front of those, which showed
+   *  up as a 21 ms empty transcript fetch; 100 ms later those follow-ups are
+   *  done and nobody is waiting, while a real click on a session is seconds
+   *  away. */
+  queueWarmServices(cwd) {
+    if (this.warmTimer) clearTimeout(this.warmTimer);
+    this.warmTimerCwd = path.resolve(cwd);
+    this.warmTimer = setTimeout(() => {
+      this.warmTimer = null;
+      this.warmTimerCwd = null;
+      this.warmServices(cwd);
+    }, 100);
+    this.warmTimer.unref?.();
+  }
+
+  /** Build one session's services ahead of the open that will need them. This is
+   *  the same per-session pair `servicesFor` returns — its own runtime and
+   *  loader, never shared with a live session — so pre-building it only moves
+   *  the work earlier; it does not weaken the isolation described above. */
+  warmServices(cwd) {
+    const resolved = path.resolve(cwd);
+    const promise = this.workspaceFor(resolved).then((shared) =>
+      this.sdk.createAgentSessionServices({ cwd: resolved, settingsManager: shared.settingsManager })
+    );
+    this.spareServices = { cwd: resolved, promise };
+    promise.catch(() => {
+      if (this.spareServices && this.spareServices.promise === promise) this.spareServices = null;
+    });
+    return promise;
   }
 
   /** Forget a workspace so the next open re-reads its extensions and settings (a
    *  `/reload`, or an extension installed while the server ran). */
   dropWorkspace(cwd) {
-    this.workspaces.delete(path.resolve(cwd));
+    const resolved = path.resolve(cwd);
+    this.workspaces.delete(resolved);
+    if (this.spareServices && this.spareServices.cwd === resolved) this.spareServices = null;
+    if (this.warmTimer && this.warmTimerCwd === resolved) {
+      clearTimeout(this.warmTimer);
+      this.warmTimer = null;
+      this.warmTimerCwd = null;
+    }
   }
 
   /**
