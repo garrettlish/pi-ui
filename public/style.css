@@ -809,13 +809,17 @@
    arriving at the top of the page rather than as a stain on it (the failure
    mode the light-polarity ambient budget exists to prevent). */
 :root[data-theme="dawn"] {
-  --page: #e6d9fb;
+  /* a more saturated lavender: the cool ground is what keeps the gold reading
+     as gold (a warm page turns it to beige), so the hue and the lightness are
+     untouched — only the chroma goes up, and only far enough that the gold ink
+     still clears 4.5:1 on it (the binding pair for this mood) */
+  --page: #e6d8fd;
   --surface: #fdfcff;
   --elevated: #f3ecff;
   --code: #eee6ff;
   --table-head: #dbcefa;
   --border: #b09cdd;
-  --border-strong: #7a55c2;
+  --border-strong: #723eda;
 
   --text: #1f1230;
   --text-2: #4c3c64;
@@ -828,24 +832,32 @@
   --accent-ink: #ffffff;
   --accent-text: #8a5200;
   /* where the gold is seen as a *fill*: the context chip, the selected row */
-  --accent-tint: #f8e2b4;
-  --accent-tint-border: #c08a1e;
+  --accent-tint: #fde5af;
+  --accent-tint-border: #d09011;
   --focus: #8a5200;
 
-  --grad-a: #a3125f;
+  /* the horizon gradient: rose into amber, with violet as the far light. Each
+     stop keeps its hue and its lightness (so a white label still clears every
+     stop) and gains chroma — these were the least saturated gradient stops in
+     the set, which is why dawn read pale next to the other light moods */
+  --grad-a: #b3005f;
   --grad-b: #9c4300;
-  --grad-c: #6a1fd0;
+  --grad-c: #6505eb;
   --te-title-2: #3f2f56;
-  --glow: rgba(163, 18, 95, 0.3);
-  --glow-2: rgba(156, 67, 0, 0.24);
-  --ambient-1: rgba(166, 26, 120, 0.15);
-  --ambient-2: rgba(190, 110, 20, 0.1);
+  --glow: rgba(179, 0, 95, 0.4);
+  --glow-2: rgba(156, 67, 0, 0.32);
+  /* the drifting blobs: alpha is the light-polarity contrast ceiling. 0.24 /
+     0.18 is the loudest tertiary metadata over the lit page still clears
+     4.66:1 (measured by npm test); past here a selected-row timestamp goes
+     unreadable */
+  --ambient-1: rgba(179, 0, 95, 0.24);
+  --ambient-2: rgba(156, 67, 0, 0.18);
   --inset-line: rgba(255, 255, 255, 0.95);
   /* the rose horizon: gone by the first card, and brighter than the ground it
      sits on, so tertiary metadata over its brightest point still clears 4.8:1 */
   --sky: radial-gradient(
     150% 65% at 50% -6%,
-    rgba(255, 130, 180, 0.48),
+    rgba(255, 130, 180, 0.58),
     rgba(255, 176, 170, 0.2) 42%,
     rgba(255, 200, 200, 0) 74%
   );
