@@ -8612,6 +8612,16 @@ function connectEvents() {
   // the life of the page: an SSE stream cannot report a *hung* server, so this
   // is what notices one.
   startConnProbe();
+  // Paint the first-run panel BEFORE awaiting /api/open. That round-trip is
+  // dominated by server-side extension work — measured 628-1200 ms to first
+  // paint, with ~330 ms of it inside one usage extension re-parsing session
+  // files — and it answers with 308 bytes. It was the gate on the page's
+  // largest paint (the panel's own lede was the LCP element), so the opening
+  // screen waited on a session that had not been created yet. A fresh tab has
+  // no items, so the empty state is already the right thing to show; a hash
+  // deep link that re-points to a real session still replaces it below.
+  const hs0 = hashState();
+  if (!hs0?.session || hs0.session === "new") updateEmptyState();
   // Sessions are no longer auto-started by the server: this tab opens its own
   // (a fresh one in the server cwd; the hash deep link below may re-point it
   // to an existing file, attaching to that file's process if one is live).

@@ -147,6 +147,32 @@ node server.js --help                    # every option
 
 Every number below was measured on a real session; they are the reason the SDK migration exists.
 
+### First paint does not wait for `/api/open`
+
+The opening screen used to arrive at 616 ms. The largest paint was the first-run panel's own lede,
+and the panel could not appear until boot's `await api("/api/open")` resolved — a round-trip that
+answers with 308 bytes but spends its time on server-side extension work. A CPU profile of one open
+put 329 ms of it inside a single usage extension re-parsing session files, on top of `pi-subagents`
+agent discovery, `pi-tracker`'s accumulator and `pi-lens` snapshot hydration. None of that is pi-ui
+code, and none of it is needed to paint a freshly loaded tab.
+
+A fresh tab has no items, so the empty state is already the correct thing to show. Boot now paints it
+before awaiting the open, and the open replaces it when the first `get_entries` lands. Measured in
+headless Chrome, 5 runs each, cold profile:
+
+| | before | after |
+| --- | --- | --- |
+| LCP (median) | 616 ms (runs 580–1072) | 92 ms (runs 88–112) |
+| FCP (median) | 60 ms | 60 ms |
+| CLS | 0.0056 | 0.0056 |
+
+The ranges do not overlap. A `#session=<file>` deep link skips the early paint, so a real session is
+never replaced by "New session"; verified by loading one — its title is the LCP element.
+
+Left alone deliberately: JS/CSS parse cost. 400 KB of decoded JS across two scripts sounds like a
+bundle-size problem, but `Performance.getMetrics` reports 11 ms of script and 24 ms of layout for the
+whole load. Cutting the bundle would buy single-digit milliseconds — a neutral change, so not made.
+
 ### One workspace build, not one process per session
 
 A `pi --mode rpc` process costs ~1.3 s, and 0.9 s of that is a single call: `createAgentSessionServices()`
