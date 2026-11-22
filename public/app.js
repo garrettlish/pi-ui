@@ -6619,17 +6619,46 @@ async function switchSession(file, cwd) {
   }
 }
 
+/** One new-session request at a time.
+ *
+ *  Starting a session costs a round trip (and, on a cold workspace, seconds of
+ *  extension binding), and the click used to change nothing on screen until all
+ *  of it finished — so the button read as dead and got clicked again. Every
+ *  repeat opened *another* session server-side: whichever open answered last
+ *  won the tab, and the losers were left behind as empty sessions nobody could
+ *  reach. Ignoring a second click is the correct answer to all of it. */
+let newSessionBusy = false;
+
 async function newSession() {
+  if (newSessionBusy) return;
+  // a follow-up is a document, not a session: starting a session puts the
+  // transcript and composer back before anything else runs
+  if (state.openFollowup) closeFollowup();
+  // Where to start. `state.workspace` is null on the workspace list, where
+  // nothing has been chosen yet — but it is also null in a tab that attached to
+  // a session before /api/sessions had a row for its cwd, and refusing there
+  // left the button doing nothing but a toast with a live session on screen.
+  // The cwd that session is running in is exactly the right place to start.
+  const cwd = state.workspace || state.cwd || null;
+  if (!cwd) {
+    toast("Select a workspace first — pick one from the list or use the folder button", "error");
+    return;
+  }
+
+  newSessionBusy = true;
+  const btn = $("#btn-new-session");
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  const prev = {
+    file: state.sessionFile,
+    name: state.sessionName,
+    items: state.items,
+    leafId: state.leafId,
+    isStreaming: state.isStreaming,
+    isCompacting: state.isCompacting,
+    lastActivityAt: state.lastActivityAt,
+  };
   try {
-    // a follow-up is a document, not a session: starting a session puts the
-    // transcript and composer back before anything else runs
-    if (state.openFollowup) closeFollowup();
-    // On the workspace list there is no active workspace to start a session in.
-    if (state.workspace == null) {
-      toast("Select a workspace first — pick one from the list or use the folder button", "error");
-      return;
-    }
-    const cwd = state.workspace || state.cwd;
     rememberScroll(); // the session being left keeps its offset
     stashCurrentView();
     // Same reason as switchSession: this tab is about to point at a new session,
@@ -6637,37 +6666,72 @@ async function newSession() {
     // there would be routed to the new session and refused (or worse, before
     // the routing fix, silently dropped while the old session stayed blocked).
     clearDialogs();
-    const resp = await api("/api/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ client: CLIENT_ID, sessionFile: null, ...(cwd ? { cwd } : {}) }),
-    });
-    if (resp.cwd) state.cwd = resp.cwd;
-    if (cwd) {
-      state.workspace = cwd;
-      localStorage.setItem(WS_KEY, cwd);
-    }
-    await waitPiReady(null);
+    // Optimistic reset, for the same reason switchSession does one: the click
+    // has to be acknowledged now, not after /api/open answers. The notice is
+    // what says "this is working", and it is why nobody clicks again.
     state.sessionFile = null;
+    // the title belongs to the session being left; leaving it up made the header
+    // name the previous conversation while the transcript already said "starting
+    // a new session", which reads as "the click did nothing"
+    state.sessionName = null;
     state.executions.clear();
     state.queued = { steering: [], followUp: [] };
     state.isStreaming = false;
     state.isCompacting = false;
     state.lastActivityAt = null;
     currentAssistant = null;
-    // clear the transcript immediately — refresh() below rebuilds from the
-    // fresh (empty) session, but this makes the reset visible without delay.
-    // A switch abandoned mid-replay can leave the flag set, so clear it here:
-    // this session is empty by construction, not still loading.
+    sessionLoading = true; // a placeholder, not an empty session: no first-run panel yet
+    state.items = [{ kind: "notice", text: "starting a new session…" }];
+    state.leafId = null;
+    renderTranscript({ follow: false });
+    transcriptEl.scrollTop = 0;
+    $("#composer-hint").textContent = HINT_IDLE;
+    renderStatus(); // drop the previous session's queue chips now, not after the spawn
+    renderHeader();
+    renderSidebar(); // the old row must stop looking like the open session
+    // a reload during the wait must land on the new session, not the old one
+    syncHash();
+
+    const resp = await api("/api/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: CLIENT_ID, sessionFile: null, cwd }),
+    });
+    if (resp.cwd) state.cwd = resp.cwd;
+    state.workspace = cwd;
+    localStorage.setItem(WS_KEY, cwd);
+    await waitPiReady(null);
+    // The session is empty by construction, so the loading flag a switch may
+    // have left set would be wrong here: clear it and let the first-run panel
+    // take the notice's place.
     sessionLoading = false;
     state.items = [];
     renderTranscript({ follow: false });
     transcriptEl.scrollTop = 0;
-    $("#composer-hint").textContent = HINT_IDLE;
     await refresh({ sessions: true });
     syncHash();
   } catch (err) {
+    // The optimistic reset above emptied the transcript. Leaving it empty over a
+    // session that is still there and still running would misreport the failure
+    // as a lost session, so put back exactly what was on screen.
+    sessionLoading = false;
+    state.sessionFile = prev.file;
+    state.sessionName = prev.name;
+    state.items = prev.items;
+    state.leafId = prev.leafId;
+    state.isStreaming = prev.isStreaming;
+    state.isCompacting = prev.isCompacting;
+    state.lastActivityAt = prev.lastActivityAt;
+    renderTranscript({ follow: false });
+    renderHeader();
+    restoreScroll(prev.file);
+    renderSidebar();
+    syncHash();
     toast(`new session failed: ${err.message}`, "error");
+  } finally {
+    newSessionBusy = false;
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
   }
 }
 

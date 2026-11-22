@@ -1625,11 +1625,24 @@ try {
   check("switching sessions drops the previous session's overlays", appJs.includes("function clearDialogs()"));
   // Both ways a tab can point at a different session must clear the overlay: a
   // sidebar switch AND "new session". Leaving it up over the new conversation is
-  // how an answer got routed at the wrong session.
+  // how an answer got routed at the wrong session. The window is wide because
+  // newSession() now checks its in-flight guard, resolves the cwd and does its
+  // optimistic reset before it reaches the dialogs — the assertion is about the
+  // call being in that function at all, not about where in it.
   check(
     "both switch and new-session clear the dialog overlay",
-    (appJs.match(/clearDialogs\(\);/g) || []).length >= 2 && /async function newSession\(\)[\s\S]{0,900}clearDialogs\(\);/.test(appJs)
+    (appJs.match(/clearDialogs\(\);/g) || []).length >= 2 && /async function newSession\(\)[\s\S]{0,2000}clearDialogs\(\);/.test(appJs)
   );
+  // Clicking "new session" used to change nothing on screen until /api/open
+  // answered, so the button read as dead and got clicked again — and every
+  // repeat opened another session server-side, with the last one to answer
+  // winning the tab. One click must mean one session, and the click has to be
+  // visible before the round trip lands or nobody believes it happened.
+  check("a new-session click is ignored while one is already in flight", /async function newSession\(\) \{\s*if \(newSessionBusy\) return;/.test(appJs));
+  check("the new-session button is disabled while it works", /btn\.setAttribute\("aria-busy", "true"\)/.test(appJs));
+  check("the button is re-enabled on every exit path", /finally \{\s*newSessionBusy = false;\s*btn\.disabled = false;/.test(appJs));
+  check("a new session is acknowledged before /api/open answers", appJs.includes("starting a new session…"));
+  check("a failed new session restores the transcript it cleared", /state\.items = prev\.items;[\s\S]{0,400}restoreScroll\(prev\.file\);/.test(appJs));
 
   // Copying a summary used to offer only the rich flavour, which a Slack
   // message box drops: it pastes the rendered HTML or the raw Markdown, and
