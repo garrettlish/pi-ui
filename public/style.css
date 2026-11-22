@@ -1845,7 +1845,11 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
 /* the second row of an entry: a jump to the run's summary, indented to line up
    under the prompt text so the pair reads as one item with a subordinate action */
 #prompt-list-pop .pl-jump {
-  display: flex; align-items: baseline; gap: 6px;
+  /* a slim subordinate row, not a 30px button: the base button rule sets
+     min-height: 30px, which would leave this 18px-tall row with 12px of dead
+     space under a baseline-aligned label — six pixels above the row's centre. */
+  display: flex; align-items: center; gap: 6px;
+  min-height: 0;
   /* the row lands under the prompt text (39px = pl-num's 20px + the entry's 9px
      padding + its 10px gap) and stops where the entry's time does: the entry
      insets its content 9px, so margin-right (3) + padding-right (6) must add up
@@ -1862,7 +1866,7 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
    weight as the prompt's rather than inheriting the link-ish row color */
 #prompt-list-pop .pl-jump-time {
   flex: none; color: var(--text-3);
-  font-size: 11px; font-variant-numeric: tabular-nums;
+  font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums;
 }
 
 /* a message a prompt outline or search hit jumped to: a ring that fades out,
