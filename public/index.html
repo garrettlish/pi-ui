@@ -140,6 +140,12 @@
                   aria-haspopup="dialog" aria-expanded="false">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
           </button>
+          <!-- the same saved summaries the sidebar lists, as a browsable page:
+               the sidebar answers "open the one I mean", this answers "what have
+               I kept?" — see the Follow-ups library section of app.js -->
+          <button id="btn-library" class="ghost icon-btn" title="Follow-ups library — every saved summary on one page" aria-label="Follow-ups library">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="13" width="7" height="7" rx="1.5"/></svg>
+          </button>
           <div id="prompt-list-pop" class="hidden" role="dialog" aria-label="User prompts"></div>
           <div class="picker">
             <button id="btn-theme" class="ghost icon-btn" title="Theme" aria-label="Theme"
@@ -177,6 +183,32 @@
       <!-- a saved follow-up: rendered from its own JSON file, with no pi
            process and no session replay behind it -->
       <section id="followup-view" class="hidden" aria-label="Follow-up"></section>
+
+      <!-- the Follow-ups library: every saved summary as a browsable page, with
+           three layouts of the same corpus behind one tab row. The sidebar tree
+           is one follow-up wide on purpose (it is a filing cabinet beside a
+           transcript); this is where the whole corpus is read, filtered and
+           compared. Rendered from the same /api/followups the sidebar uses. -->
+      <section id="library" class="hidden" aria-label="Follow-ups library">
+        <header id="library-bar">
+          <span class="lib-title">Follow-ups</span>
+          <span id="lib-count" class="badge">0</span>
+          <div class="lib-search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input id="lib-q" type="search" placeholder="Search titles, tags and text…" aria-label="Search follow-ups">
+          </div>
+          <div id="lib-facets" class="lib-facets"></div>
+          <span class="spacer"></span>
+          <div id="lib-views" class="lib-views" role="tablist" aria-label="Layout">
+            <button id="lib-view-grid" role="tab" aria-selected="true" title="Cards: scan the whole library">Cards</button>
+            <button id="lib-view-split" role="tab" aria-selected="false" title="List and read side by side">Split</button>
+            <button id="lib-view-grouped" role="tab" aria-selected="false" title="Cards, grouped by tag, folder or month">Grouped</button>
+          </div>
+          <button id="lib-close" class="ghost icon-btn" title="Close the library (Esc)" aria-label="Close the library">✕</button>
+        </header>
+        <div id="lib-active" class="lib-active"></div>
+        <div id="lib-body" class="lib-body"></div>
+      </section>
 
       <!-- status and queued messages live directly above the input, where the
            eye already is; in the header they were easy to miss -->

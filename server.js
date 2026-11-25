@@ -856,12 +856,52 @@ const FOLLOWUP_TAG_LEN = 40;
 /** per-file metadata, keyed by path and validated by mtime+size: listing reads
  *  every follow-up once, then only the ones that changed */
 const followupCache = new Map();
+/** How much of a summary's plain text the cache keeps and the list search reads.
+ *  The library page searches bodies, and re-reading 500 JSON files per keystroke
+ *  is not an option — so the text a query is matched against lives beside the
+ *  metadata. The cap is what bounds that cache (500 x this is the worst case, and
+ *  a summary is usually a tenth of it); a longer document is still found by its
+ *  first 24 000 characters, which is past the point where a snippet is useful. */
+const FOLLOWUP_SEARCH_MAX = 24000;
+/** How much of the plain text a card shows before the reader opens the summary. */
+const FOLLOWUP_EXCERPT_MAX = 320;
 
 function followupPath(id) {
   return path.join(FOLLOWUP_DIR, `${id}.json`);
 }
 
-function followupMeta(rec) {
+/** A summary's text as prose: fenced code dropped (a card is not a code
+ *  viewer), heading marks and table pipes removed, whitespace collapsed. This is
+ *  both what a card previews and what a body query is matched against, so the
+ *  text a reader sees and the text they searched for cannot diverge. */
+function followupPlain(text) {
+  if (typeof text !== "string") return "";
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}>\s?/gm, "")
+    .replace(/^\s{0,3}[-*+]\s+/gm, "")
+    .replace(/\|/g, " ")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, FOLLOWUP_SEARCH_MAX);
+}
+
+/** A window of `plain` around the first query hit: enough context on either side
+ *  to judge the match without opening the document. */
+function followupSnippet(plain, needle) {
+  if (!needle) return null;
+  const i = plain.toLowerCase().indexOf(needle.toLowerCase());
+  if (i < 0) return null;
+  const start = Math.max(0, i - 60);
+  const end = Math.min(plain.length, i + needle.length + 110);
+  return `${start > 0 ? "…" : ""}${plain.slice(start, end)}${end < plain.length ? "…" : ""}`;
+}
+
+function followupMeta(rec, plain = followupPlain(rec.text)) {
   return {
     id: rec.id,
     title: rec.title || "",
@@ -872,6 +912,9 @@ function followupMeta(rec) {
     sessionTitle: rec.sessionTitle || null,
     tags: followupTags(rec),
     chars: typeof rec.text === "string" ? rec.text.length : 0,
+    // A card has to say something before it is opened, and the list must stay
+    // small: one line of prose is the whole of what the library grid needs.
+    excerpt: plain.slice(0, FOLLOWUP_EXCERPT_MAX),
   };
 }
 
@@ -899,13 +942,14 @@ function stringField(value, max) {
   return typeof value === "string" ? value.slice(0, max) : null;
 }
 
-async function listFollowups() {
+async function listFollowups({ q = "", limit = FOLLOWUP_LIST_MAX } = {}) {
   let names;
   try {
     names = await fsp.readdir(FOLLOWUP_DIR);
   } catch {
     return []; // the directory only appears once something is saved
   }
+  const needle = q.trim().toLowerCase();
   const list = [];
   const live = new Set();
   for (const name of names) {
@@ -922,21 +966,35 @@ async function listFollowups() {
     const key = `${st.mtimeMs}:${st.size}`;
     const cached = followupCache.get(file);
     if (cached && cached.key === key) {
-      list.push(cached.meta);
+      list.push(cached.entry);
       continue;
     }
     try {
       const rec = JSON.parse(await fsp.readFile(file, "utf8"));
       if (!rec || rec.id !== match[1]) continue; // a file that is not ours
-      const meta = followupMeta(rec);
-      followupCache.set(file, { key, meta });
-      list.push(meta);
+      const plain = followupPlain(rec.text);
+      const entry = { meta: followupMeta(rec, plain), plain };
+      followupCache.set(file, { key, entry });
+      list.push(entry);
     } catch {
       followupCache.delete(file); // a truncated write is not a follow-up
     }
   }
   for (const file of followupCache.keys()) if (!live.has(file)) followupCache.delete(file);
-  return list.sort((a, b) => b.createdAt - a.createdAt).slice(0, FOLLOWUP_LIST_MAX);
+  const hits = needle
+    ? list.filter(({ meta, plain }) =>
+        meta.title.toLowerCase().includes(needle) ||
+        (meta.sessionTitle || "").toLowerCase().includes(needle) ||
+        meta.tags.some((t) => t.toLowerCase().includes(needle)) ||
+        plain.toLowerCase().includes(needle)
+      )
+    : list;
+  return hits
+    .sort((a, b) => b.meta.createdAt - a.meta.createdAt)
+    // A match is only worth offering if the reader can see why it matched: the
+    // snippet is cut here, where the plain text is already in hand.
+    .slice(0, limit)
+    .map(({ meta, plain }) => ({ ...meta, snippet: followupSnippet(plain, needle) }));
 }
 
 async function readFollowup(id) {
@@ -2018,8 +2076,12 @@ const server = http.createServer(async (req, res) => {
     // Follow-ups: the summaries the user kept. The list carries metadata only,
     // so the sidebar never downloads full answers; one follow-up is fetched when
     // it is opened, and that read never touches pi or the session directory.
+    // `q` searches titles, tags and body text, and answers with a snippet around
+    // each body match — the library page's own search, so a keystroke does not
+    // re-read every file from the browser.
     if (pathname === "/api/followups" && req.method === "GET") {
-      sendJson(res, 200, { followups: await listFollowups() });
+      const q = (url.searchParams.get("q") || "").slice(0, 200);
+      sendJson(res, 200, { followups: await listFollowups({ q }) });
       return;
     }
 

@@ -162,6 +162,9 @@ const state = {
   openFollowup: null,
   /** true while the open follow-up is being edited in place (title + body) */
   followupEditing: false,
+  /** true when the open follow-up was opened from the library page, so Back
+   *  returns to the list instead of the transcript */
+  followupFromLibrary: false,
   cwd: null,
   /** selected workspace cwd; null = workspace list view; undefined = not yet initialized */
   workspace: undefined,
@@ -193,10 +196,11 @@ function applySidebarCollapsed(collapsed) {
 }
 
 function toggleSidebar() {
-  // The class is the truth, not the stored preference: below 720px the drawer
-  // starts closed without anything having been written to storage, so deriving
-  // the next state from the saved value would leave the first tap with nothing
-  // to do. Toggling the class makes the button work in both directions.
+  // The class is the truth, not the stored preference: below the drawer
+  // threshold the panel starts closed without anything having been written to
+  // storage, so deriving the next state from the saved value would leave the
+  // first tap with nothing to do. Toggling the class makes the button work in
+  // both directions.
   const collapsed = !document.body.classList.contains("sidebar-collapsed");
   if (collapsed) localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1");
   else localStorage.removeItem(SIDEBAR_COLLAPSED_KEY);
@@ -205,11 +209,12 @@ function toggleSidebar() {
 
 document.getElementById("btn-sidebar-collapse").addEventListener("click", toggleSidebar);
 document.getElementById("btn-sidebar-expand").addEventListener("click", toggleSidebar);
-/** The narrow-window drawer threshold, mirrored from the 720px media query in
+/** The narrow-window drawer threshold, mirrored from the media query in
  *  style.css that turns the sidebar into an off-canvas panel. Kept as a named
  *  constant because `applySidebarCollapsed(sidebarCollapsed())` below needs to
- *  know whether "not collapsed" still means "on screen". */
-const NARROW_WINDOW = 720;
+ *  know whether "not collapsed" still means "on screen". The smoke test pins
+ *  the two files to the same number — change both, or neither. */
+const NARROW_WINDOW = 900;
 applySidebarCollapsed(sidebarCollapsed() || window.innerWidth <= NARROW_WINDOW);
 // A window can be resized across the threshold after boot (a desktop window
 // dragged narrow, a tablet rotated). The drawer state follows the width, so a
@@ -3468,8 +3473,15 @@ function sessionHasTurns() {
  *  the composer usable. Hidden as soon as a turn exists (or when a follow-up
  *  is on screen, whose section already replaces the transcript). */
 function updateEmptyState() {
-  const empty = !sessionLoading && !state.openFollowup && !sessionHasTurns();
+  // the library is a full-page view of the follow-ups, so the "new session"
+  // panel behind it would be visible the moment it is hidden without this
+  const empty = !sessionLoading && !state.openFollowup && !state.library.open && !sessionHasTurns();
   $("#transcript-empty").classList.toggle("hidden", !empty);
+  // the notice chips (model → …, thinking level → …) repeat what the toolbar
+  // pickers already show; over the first-run panel they are metadata noise.
+  // The class only hides them — they stay in the record and reappear with the
+  // first turn.
+  $("#transcript-wrap").classList.toggle("session-empty", empty);
   if (!empty) return;
   const target = $("#te-workspace");
   if (!target) return;
@@ -3841,7 +3853,9 @@ function renderHeader() {
   // stays attached underneath: the header has to name the thing being read
   $("#session-name").textContent = state.openFollowup
     ? state.openFollowup.title || "(untitled follow-up)"
-    : state.sessionName || meta?.title || fallback;
+    : state.library.open
+      ? `Follow-ups · ${state.followups.length}`
+      : state.sessionName || meta?.title || fallback;
   const cu = state.stats?.contextUsage;
   // `tokens`/`percent` are null right after compaction until a fresh response;
   // contextWindow comes from the active model, so fall back to it for the max.
@@ -5779,6 +5793,9 @@ async function openFollowup(id) {
   state.followupEditing = false;
   renderFollowup(rec);
   $("#followup-view").classList.remove("hidden");
+  // the library is the other full-page view of these same records: showing a
+  // document means leaving whichever of the two was up, not stacking them
+  $("#library").classList.add("hidden");
   $("#transcript-wrap").classList.add("hidden");
   $("#composer-dock").classList.add("hidden");
   $("#followup-view").scrollTop = 0;
@@ -5789,9 +5806,21 @@ async function openFollowup(id) {
 
 function closeFollowup() {
   if (!state.openFollowup) return;
+  const backToLibrary = state.followupFromLibrary;
   state.openFollowup = null;
   state.followupEditing = false;
+  state.followupFromLibrary = false;
   $("#followup-view").classList.add("hidden");
+  // Back goes where the reader came from: a card in the library returns to the
+  // library (with its filters and scroll intact), a sidebar row to the session
+  if (backToLibrary && state.library.open) {
+    $("#library").classList.remove("hidden");
+    renderHeader();
+    syncHash();
+    renderSidebar();
+    renderLibrary();
+    return;
+  }
   $("#transcript-wrap").classList.remove("hidden");
   $("#composer-dock").classList.remove("hidden");
   renderHeader();
@@ -5815,6 +5844,777 @@ async function openFollowupSession(rec) {
   closeFollowup();
   await switchSession(file, rec.cwd || undefined);
 }
+
+// ---------------------------------------------------------------------------
+// Follow-ups library
+// ---------------------------------------------------------------------------
+// The sidebar's Follow-ups tab is a filing cabinet: one 280px column, a tree by
+// tag, and one document at a time in the main column. It answers "open the
+// summary I have in mind" and cannot answer "what have I kept?" — 35 rows where
+// a tag has to be read off a chip and no body is ever visible.
+//
+// This is that second page: the whole corpus at once in the main column, three
+// layouts over one filter bar, and a search that reaches the bodies (the server
+// matches them; see listFollowups). Same records, no second store: opening a
+// card leaves for the document page, and Back returns here rather than to the
+// transcript, because that is where the reader came from.
+
+const LIB_VIEW_KEY = "piweb-library-view";
+const LIB_VIEWS = ["grid", "split", "grouped"];
+const LIB_GROUPS = ["tag", "repo", "month"];
+const LIB_TAGS_CLOSED_KEY = "piweb-library-groups-closed";
+/** the split layout's dragged list width, and the two floors that keep each
+ *  side usable: a 320px list still shows a title and its tag, a 420px preview
+ *  still reads as a column of prose */
+const LIB_SPLIT_WIDTH_KEY = "piweb-library-split-width";
+const LIB_SPLIT_MIN_ROWS = 260;
+const LIB_SPLIT_MIN_PREVIEW = 420;
+/** the group key for summaries filed under no tag. A NUL cannot be typed into
+ *  the tag input, so no real tag can collide with it. */
+const LIB_UNTAGGED = "\u0000untagged";
+const DAY_MS = 86400000;
+/** window sizes the 时间 facet offers, and the label each one gets */
+const LIB_TIME_WINDOWS = [
+  { days: 7, label: "Last 7 days" },
+  { days: 30, label: "Last 30 days" },
+  { days: 90, label: "Last 90 days" },
+];
+
+/** every library filter in one place. Sets, not single values: "Intelligence in
+ *  obsidian/*" is a real question and a radio cannot ask it. */
+state.library = {
+  open: false,
+  view: LIB_VIEWS.includes(localStorage.getItem(LIB_VIEW_KEY)) ? localStorage.getItem(LIB_VIEW_KEY) : "grid",
+  q: "",
+  tags: new Set(),
+  repos: new Set(),
+  days: 0, // 0 = any time
+  grouping: "tag",
+  /** summaries the last query matched, newest first; the server has already
+   *  narrowed them, so this is what the facets then filter in the browser */
+  items: [],
+  /** id -> the full record, for the split layout's preview. The list carries
+   *  metadata only, so a body is read once per summary and kept for the visit. */
+  full: new Map(),
+  /** id of the summary shown in the split layout's preview */
+  openId: null,
+  /** group keys folded shut, per grouping dimension (tag:name, repo:path, ...) */
+  closed: closedLibraryGroups(),
+  /** id of the facet menu the reader has open, across re-renders. Rendering
+   *  rebuilds the bar, so without this every tick closed the menu and a
+   *  multi-select filter became one filter per open. */
+  openMenu: null,
+  /** true while a query is in flight, so a keystroke cannot render the previous
+   *  result set and look like the query was ignored */
+  loading: false,
+};
+
+function closedLibraryGroups() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(LIB_TAGS_CLOSED_KEY) || "[]");
+    return new Set(Array.isArray(arr) ? arr.filter((k) => typeof k === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function setLibraryGroupClosed(key, closed) {
+  if (closed) state.library.closed.add(key);
+  else state.library.closed.delete(key);
+  localStorage.setItem(LIB_TAGS_CLOSED_KEY, JSON.stringify([...state.library.closed]));
+}
+
+/** The library's visible summaries: the query the server answered, narrowed by
+ *  the facets the reader set. Facets are applied here rather than server-side
+ *  because they come from the metadata the page already holds, so ticking a tag
+ *  repaints without a round-trip. */
+function libraryItems() {
+  const { tags, repos, days } = state.library;
+  const cutoff = days ? Date.now() - days * DAY_MS : 0;
+  return state.library.items.filter((f) => {
+    if (tags.size) {
+      const mine = f.tags && f.tags.length ? f.tags : [LIB_UNTAGGED];
+      if (![...tags].some((t) => mine.includes(t))) return false;
+    }
+    if (repos.size && !repos.has(f.cwd || "")) return false;
+    if (cutoff && (f.createdAt || 0) < cutoff) return false;
+    return true;
+  });
+}
+
+/** A query fragment as text nodes, with each occurrence wrapped in <mark>. Built
+ *  from DOM nodes rather than innerHTML: the query is user input and the
+ *  summary's own text is not markup at this point. */
+function highlighted(text, q) {
+  const s = String(text ?? "");
+  if (!q) return [document.createTextNode(s)];
+  const needle = q.toLowerCase();
+  const out = [];
+  let at = 0;
+  for (;;) {
+    const i = s.toLowerCase().indexOf(needle, at);
+    if (i < 0) break;
+    if (i > at) out.push(document.createTextNode(s.slice(at, i)));
+    out.push(el("mark", { class: "lib-hit", text: s.slice(i, i + q.length) }));
+    at = i + q.length;
+  }
+  if (at < s.length) out.push(document.createTextNode(s.slice(at)));
+  return out;
+}
+
+/** Two-level workspace name, the same shape the sidebar rows use ("obsidian/…") */
+function libraryRepoLabel(cwd) {
+  return wsLabel(cwd) || "(no workspace)";
+}
+
+function libraryWhenLabel(ms) {
+  if (!ms) return "";
+  const age = Date.now() - ms;
+  if (age < 60000) return "just now";
+  if (age < DAY_MS) return `${Math.max(1, Math.round(age / 3600000))}h ago`;
+  if (age < 7 * DAY_MS) return `${Math.round(age / DAY_MS)}d ago`;
+  return fmtDate(ms);
+}
+
+/** Card footer: where it came from, when, and how big it is — the three things
+ *  that separate two summaries with similar titles. */
+function libraryCardFooter(f) {
+  return el(
+    "footer",
+    {},
+    el("span", { class: "repo", title: f.cwd || "", text: libraryRepoLabel(f.cwd) }),
+    el("span", { text: "·" }),
+    el("span", { text: libraryWhenLabel(f.createdAt) }),
+    el("span", { class: "right", text: `${fmtNum(f.chars || 0)} chars` })
+  );
+}
+
+function libraryTagChips(f, { max = 0 } = {}) {
+  const tags = followupTagsOf(f);
+  if (!tags.length) return el("div", { class: "lib-tags" }, el("span", { class: "s-tag lib-untagged", text: "untagged" }));
+  const shown = max ? tags.slice(0, max) : tags;
+  const rest = tags.length - shown.length;
+  return el(
+    "div",
+    { class: "lib-tags" },
+    ...shown.map((t) => el("span", { class: "s-tag", text: t })),
+    rest > 0 ? el("span", { class: "s-tag more", title: tags.join(", "), text: `+${rest}` }) : null
+  );
+}
+
+/** One card. `selectable` adds the split layout's selected outline. The excerpt
+ *  and the snippet are mutually exclusive on purpose: the snippet is the reason
+ *  the summary matched, so showing the opening paragraph instead would hide it. */
+function libraryCard(f, { selectable = false } = {}) {
+  const q = state.library.q;
+  return el(
+    "article",
+    {
+      class: `lib-card${selectable && state.library.openId === f.id ? " selected" : ""}`,
+      "data-id": f.id,
+      tabindex: "0",
+      title: f.sessionTitle || f.title || "",
+      onclick: () => openLibraryFollowup(f.id),
+      onkeydown: onActivate(() => openLibraryFollowup(f.id)),
+    },
+    el("h3", {}, ...highlighted(f.title || "(untitled follow-up)", q)),
+    // The lead is one fixed-height slot whether it holds an excerpt or a search
+    // snippet: the two are different lengths (4 prose lines vs 3 in a tinted
+    // box), and letting them size the card is what made a grid row ragged.
+    el(
+      "div",
+      { class: "lib-lead" },
+      f.snippet
+        ? el("div", { class: "lib-snippet" }, ...highlighted(f.snippet, q))
+        : el("p", { class: "lib-excerpt" }, ...highlighted(f.excerpt || "", q))
+    ),
+    libraryTagChips(f, { max: 4 }),
+    libraryCardFooter(f)
+  );
+}
+
+function libraryEmpty() {
+  const any = state.followups.length;
+  return el(
+    "div",
+    { class: "lib-empty" },
+    any ? "Nothing matches these filters" : "No follow-ups yet — open a summary in a session and press Follow-up",
+    el("div", {
+      class: "lib-empty-tip",
+      text: any ? "Try removing a filter, or search a word from the body." : "Only saved summaries appear here; sessions stay where they are.",
+    })
+  );
+}
+
+/** ---- layout 1: cards ---- */
+function renderLibraryGrid(items) {
+  if (!items.length) return libraryEmpty();
+  return el("div", { class: "lib-scroll" }, el("div", { class: "lib-grid" }, ...items.map((f) => libraryCard(f))));
+}
+
+/** ---- layout 2: list + preview ---- */
+function libraryPreview(f) {
+  const box = el("div", { class: "lib-pv" });
+  const body = el("div", { class: "assistant-text lib-pv-body" });
+  // the preview is a reading surface, so it renders through the transcript's own
+  // Markdown path — the same escaping, the same code blocks, the same diagrams
+  box.append(
+    el(
+      "div",
+      { class: "lib-pv-head" },
+      el("div", { class: "lib-pv-title" }, ...highlighted(f.title || "(untitled follow-up)", state.library.q)),
+      el(
+        "div",
+        { class: "lib-pv-meta" },
+        el("span", { text: fmtDate(f.createdAt) }),
+        el("span", { text: libraryRepoLabel(f.cwd), title: f.cwd || "" }),
+        el("span", { text: `${fmtNum(f.chars || 0)} chars` }),
+        f.sessionTitle ? el("span", { text: `from: ${f.sessionTitle}`, title: f.sessionFile || "" }) : null
+      ),
+      libraryTagChips(f)
+    )
+  );
+  body.replaceChildren(...htmlFragment(renderMarkdown(f.text || "")));
+  hydrateMermaid(body);
+  box.append(body);
+  // the preview is read-only: editing stays on the document page, so there is
+  // one editor and one place a save can land
+  box.append(
+    el(
+      "div",
+      { class: "lib-pv-open" },
+      el("button", { class: "turn-action", onclick: () => openLibraryFollowup(f.id) }, el("span", { text: "Open" }))
+    )
+  );
+  return box;
+}
+
+/** The split layout keeps the open summary's whole record, including its body:
+ *  the list's entries come from the metadata list (no text), so the body is read
+ *  on demand — one JSON file, exactly like the document page. */
+async function loadLibraryPreview(id) {
+  if (!id) return null;
+  const cached = state.library.full.get(id);
+  if (cached) return cached;
+  try {
+    const data = await api(`/api/followups/${encodeURIComponent(id)}`);
+    const rec = data.followup;
+    if (rec) state.library.full.set(id, rec);
+    return rec;
+  } catch {
+    return null;
+  }
+}
+
+function renderLibrarySplit(items) {
+  if (!items.length) return el("div", { class: "lib-scroll" }, libraryEmpty());
+  // follow the visible set: a filter that excludes the open summary must not
+  // leave its preview on screen with no row to point at
+  if (!state.library.openId || !items.some((f) => f.id === state.library.openId)) {
+    state.library.openId = items[0].id;
+  }
+  const openId = state.library.openId;
+  const rows = el(
+    "div",
+    { class: "lib-rows" },
+    ...items.map((f) =>
+      el(
+        "div",
+        {
+          class: `lib-row${f.id === openId ? " active" : ""}`,
+          "data-id": f.id,
+          tabindex: "0",
+          onclick: () => selectLibraryRow(f.id),
+          onkeydown: onActivate(() => selectLibraryRow(f.id)),
+        },
+        el(
+          "div",
+          { class: "row-main" },
+          el("div", { class: "row-title" }, ...highlighted(f.title || "(untitled follow-up)", state.library.q)),
+          el(
+            "div",
+            { class: "row-sub" },
+            ...(followupTagsOf(f).length
+              ? followupTagsOf(f).slice(0, 2).map((t) => el("span", { class: "s-tag", text: t }))
+              : [el("span", { class: "s-tag lib-untagged", text: "untagged" })]),
+            el("span", { text: libraryRepoLabel(f.cwd) })
+          )
+        ),
+        el("span", { class: "row-when", text: libraryWhenLabel(f.createdAt) })
+      )
+    )
+  );
+  // the preview paints from whatever record is already in hand, then upgrades to
+  // the full body once its file has been read: the list stays responsive and a
+  // slow disk never blocks a row click
+  const preview = el("div", { class: "lib-preview" });
+  // A stored width survives re-renders (every row click rebuilds this layout),
+  // and the divider is the same affordance the sidebar's has: a hairline with a
+  // wider hit area, double-click to go back to the default split. Below the
+  // drawer threshold the layout is a single column, so the width is not applied
+  // at all — an inline width there would fight the media query.
+  const savedW = Number(localStorage.getItem(LIB_SPLIT_WIDTH_KEY));
+  if (savedW > 0 && window.innerWidth > NARROW_WINDOW) rows.style.width = `${savedW}px`;
+  const divider = librarySplitDivider(rows);
+  const paint = (rec) => {
+    preview.replaceChildren();
+    if (!rec) {
+      preview.append(el("div", { class: "lib-empty", text: "Reading…" }));
+      return;
+    }
+    preview.append(libraryPreview(rec));
+    hydrateMermaid(preview);
+  };
+  paint(state.library.full.get(openId) || null);
+  if (!state.library.full.has(openId)) {
+    loadLibraryPreview(openId).then((rec) => {
+      // a second click may have moved the selection on while this read was out
+      if (rec && state.library.openId === openId) paint(rec);
+    });
+  }
+  return el("div", { class: "lib-split" }, rows, divider, preview);
+}
+
+/** The split layout's drag handle. Same behaviour as the sidebar's #resizer —
+ *  pointer capture, width written while dragging, persisted on release — but the
+ *  pane it sizes is rebuilt on every render, so the width lives in localStorage
+ *  and is re-applied by renderLibrarySplit rather than held on the element. */
+function librarySplitDivider(rows) {
+  const divider = el("div", {
+    class: "lib-divider",
+    role: "separator",
+    "aria-orientation": "vertical",
+    "aria-label": "Resize the follow-up list",
+    title: "Drag to resize · double-click to reset",
+  });
+  const apply = (px) => {
+    const total = divider.parentElement?.getBoundingClientRect().width || 0;
+    // the preview keeps room to be a reading column: a list dragged to the far
+    // edge would otherwise leave a 60px sliver of document
+    const max = Math.max(LIB_SPLIT_MIN_ROWS, total - LIB_SPLIT_MIN_PREVIEW);
+    rows.style.width = `${Math.min(max, Math.max(LIB_SPLIT_MIN_ROWS, px))}px`;
+  };
+  divider.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = rows.getBoundingClientRect().width;
+    divider.classList.add("dragging");
+    document.body.classList.add("resizing");
+    divider.setPointerCapture(e.pointerId);
+    const onMove = (ev) => apply(startW + (ev.clientX - startX));
+    const onUp = (ev) => {
+      apply(startW + (ev.clientX - startX));
+      localStorage.setItem(LIB_SPLIT_WIDTH_KEY, String(Math.round(rows.getBoundingClientRect().width)));
+      divider.classList.remove("dragging");
+      document.body.classList.remove("resizing");
+      divider.removeEventListener("pointermove", onMove);
+      divider.removeEventListener("pointerup", onUp);
+      divider.removeEventListener("pointercancel", onUp);
+    };
+    divider.addEventListener("pointermove", onMove);
+    divider.addEventListener("pointerup", onUp);
+    divider.addEventListener("pointercancel", onUp);
+  });
+  divider.addEventListener("dblclick", () => {
+    localStorage.removeItem(LIB_SPLIT_WIDTH_KEY);
+    rows.style.width = "";
+  });
+  return divider;
+}
+
+function selectLibraryRow(id) {
+  state.library.openId = id;
+  renderLibrary();
+}
+
+/** ---- layout 3: grouped cards ---- */
+function libraryGroupKey(f) {
+  const g = state.library.grouping;
+  if (g === "repo") return f.cwd || "";
+  if (g === "month") {
+    const d = new Date(f.createdAt || 0);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+  const tags = followupTagsOf(f);
+  return tags.length ? tags[0] : LIB_UNTAGGED;
+}
+
+function libraryGroupLabel(key) {
+  const g = state.library.grouping;
+  if (key === LIB_UNTAGGED) return "Untagged";
+  if (g === "repo") return key ? libraryRepoLabel(key) : "(no workspace)";
+  if (g === "month") {
+    const [y, m] = key.split("-").map(Number);
+    if (!y || !m) return key;
+    return new Intl.DateTimeFormat([], { year: "numeric", month: "long" }).format(new Date(y, m - 1, 1));
+  }
+  return key;
+}
+
+function renderLibraryGrouped(items) {
+  if (!items.length) return el("div", { class: "lib-scroll" }, libraryEmpty());
+  const groups = new Map();
+  for (const f of items) {
+    const key = libraryGroupKey(f);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+  const keys = [...groups.keys()].sort((a, b) => {
+    if (state.library.grouping === "month") return b.localeCompare(a); // newest month first
+    const ua = a === LIB_UNTAGGED;
+    const ub = b === LIB_UNTAGGED;
+    if (ua !== ub) return ua ? 1 : -1; // the leftovers pile goes last
+    return libraryGroupLabel(a).localeCompare(libraryGroupLabel(b), undefined, { sensitivity: "base" });
+  });
+  const scroll = el("div", { class: "lib-scroll" });
+  for (const key of keys) {
+    const closed = state.library.closed.has(`${state.library.grouping}:${key}`);
+    const head = el(
+      "button",
+      {
+        class: `lib-group-head${closed ? "" : " open"}`,
+        "aria-expanded": String(!closed),
+        onclick: () => {
+          setLibraryGroupClosed(`${state.library.grouping}:${key}`, !closed);
+          renderLibrary();
+        },
+      },
+      el("span", { class: "caret", "aria-hidden": "true", text: "›" }),
+      el("span", { text: libraryGroupLabel(key) }),
+      el("span", { class: "g-count", text: String(groups.get(key).length) })
+    );
+    scroll.append(
+      el(
+        "div",
+        { class: "lib-group" },
+        head,
+        closed ? null : el("div", { class: "lib-grid" }, ...groups.get(key).map((f) => libraryCard(f)))
+      )
+    );
+  }
+  return scroll;
+}
+
+/** ---- filter bar ---- */
+
+/** Counts for a facet menu come from the *unfiltered* list, so a ticked box
+ *  never changes the numbers beside the other boxes (which would make the menu
+ *  look like it had lost entries). */
+function libraryFacetCounts(field) {
+  const m = new Map();
+  for (const f of state.followups) {
+    const keys = field === "tag" ? (followupTagsOf(f).length ? followupTagsOf(f) : [LIB_UNTAGGED]) : [f.cwd || ""];
+    for (const k of keys) m.set(k, (m.get(k) || 0) + 1);
+  }
+  return [...m.entries()].sort((a, b) => {
+    if (a[0] === LIB_UNTAGGED || a[0] === "") return 1;
+    if (b[0] === LIB_UNTAGGED || b[0] === "") return -1;
+    return b[1] - a[1];
+  });
+}
+
+function libraryFacet({ id, label, field }) {
+  const picked = field === "tag" ? state.library.tags : state.library.repos;
+  const menu = el("div", { class: `lib-facet-menu${state.library.openMenu === id ? "" : " hidden"}`, role: "menu" });
+  for (const [key, n] of libraryFacetCounts(field)) {
+    menu.append(
+      el(
+        "div",
+        {
+          class: "lib-facet-item",
+          role: "menuitemcheckbox",
+          "aria-checked": String(picked.has(key)),
+          tabindex: "0",
+          onclick: (e) => {
+            e.stopPropagation();
+            picked.has(key) ? picked.delete(key) : picked.add(key);
+            renderLibrary();
+          },
+          onkeydown: onActivate(() => {
+            picked.has(key) ? picked.delete(key) : picked.add(key);
+            renderLibrary();
+          }),
+        },
+        el("span", { class: "box", "aria-hidden": "true" }),
+        el("span", { text: field === "tag" ? (key === LIB_UNTAGGED ? "Untagged" : key) : key ? libraryRepoLabel(key) : "(no workspace)", title: key }),
+        el("span", { class: "n", text: String(n) })
+      )
+    );
+  }
+  if (picked.size) {
+    menu.append(el("div", { class: "lib-facet-sep" }));
+    menu.append(
+      el("div", {
+        class: "lib-facet-item",
+        tabindex: "0",
+        onclick: (e) => {
+          e.stopPropagation();
+          picked.clear();
+          renderLibrary();
+        },
+        onkeydown: onActivate(() => {
+          picked.clear();
+          renderLibrary();
+        }),
+      }, el("span", { text: `Clear ${field}s` }))
+    );
+  }
+  const btn = el(
+    "button",
+    {
+      class: "lib-facet-btn",
+      "aria-haspopup": "true",
+      "aria-expanded": String(state.library.openMenu === id),
+      onclick: (e) => {
+        e.stopPropagation();
+        state.library.openMenu = state.library.openMenu === id ? null : id;
+        renderLibrary();
+      },
+    },
+    el("span", { class: "facet-word", text: label }),
+    el("span", { text: picked.size ? `${picked.size}` : "" }),
+    el("span", { class: "caret", "aria-hidden": "true", text: "▼" })
+  );
+  return el("div", { class: `lib-facet${picked.size ? " on" : ""}`, id }, btn, menu);
+}
+
+function libraryTimeFacet() {
+  const menu = el("div", {
+    class: `lib-facet-menu${state.library.openMenu === "lib-facet-time" ? "" : " hidden"}`,
+    role: "menu",
+  });
+  for (const w of LIB_TIME_WINDOWS) {
+    const n = state.followups.filter((f) => Date.now() - (f.createdAt || 0) <= w.days * DAY_MS).length;
+    menu.append(
+      el(
+        "div",
+        {
+          class: "lib-facet-item",
+          role: "menuitemradio",
+          "aria-checked": String(state.library.days === w.days),
+          tabindex: "0",
+          onclick: (e) => {
+            e.stopPropagation();
+            state.library.days = state.library.days === w.days ? 0 : w.days;
+            renderLibrary();
+          },
+          onkeydown: onActivate(() => {
+            state.library.days = state.library.days === w.days ? 0 : w.days;
+            renderLibrary();
+          }),
+        },
+        el("span", { class: "box", "aria-hidden": "true" }),
+        el("span", { text: w.label }),
+        el("span", { class: "n", text: String(n) })
+      )
+    );
+  }
+  const label = LIB_TIME_WINDOWS.find((w) => w.days === state.library.days)?.label || "";
+  const btn = el(
+    "button",
+    {
+      class: "lib-facet-btn",
+      "aria-haspopup": "true",
+      "aria-expanded": String(state.library.openMenu === "lib-facet-time"),
+      onclick: (e) => {
+        e.stopPropagation();
+        state.library.openMenu = state.library.openMenu === "lib-facet-time" ? null : "lib-facet-time";
+        renderLibrary();
+      },
+    },
+    el("span", { class: "facet-word", text: "When" }),
+    el("span", { text: label ? `· ${state.library.days}d` : "" }),
+    el("span", { class: "caret", "aria-hidden": "true", text: "▼" })
+  );
+  return el("div", { class: `lib-facet${state.library.days ? " on" : ""}`, id: "lib-facet-time" }, btn, menu);
+}
+
+function closeLibraryMenus() {
+  if (!state.library.openMenu) return;
+  state.library.openMenu = null;
+  for (const m of document.querySelectorAll("#lib-facets .lib-facet-menu")) m.classList.add("hidden");
+  for (const b of document.querySelectorAll("#lib-facets .lib-facet-btn")) b.setAttribute("aria-expanded", "false");
+}
+
+/** The chips for every filter in force, each removable, plus one "Clear all".
+ *  Without this the reader has no way to see why the list is short — the facet
+ *  buttons only show a count. */
+function renderLibraryActive() {
+  const host = $("#lib-active");
+  host.replaceChildren();
+  const { tags, repos, days, q } = state.library;
+  const chip = (label, onClear) =>
+    host.append(
+      el(
+        "span",
+        { class: "lib-chip" },
+        el("span", { text: label }),
+        el("button", { title: `Remove ${label}`, "aria-label": `Remove ${label}`, text: "✕", onclick: onClear })
+      )
+    );
+  for (const t of tags) chip(t === LIB_UNTAGGED ? "Untagged" : t, () => { tags.delete(t); renderLibrary(); });
+  for (const r of repos) chip(libraryRepoLabel(r), () => { repos.delete(r); renderLibrary(); });
+  if (days) chip(LIB_TIME_WINDOWS.find((w) => w.days === days)?.label || `${days}d`, () => { state.library.days = 0; renderLibrary(); });
+  if (q) chip(`"${q}"`, () => { state.library.q = ""; $("#lib-q").value = ""; loadLibrary(); });
+  if (host.children.length) {
+    host.append(
+      el("button", {
+        class: "lib-clear",
+        text: "Clear all",
+        onclick: () => {
+          state.library.tags.clear();
+          state.library.repos.clear();
+          state.library.days = 0;
+          state.library.q = "";
+          $("#lib-q").value = "";
+          loadLibrary();
+        },
+      })
+    );
+  }
+}
+
+/** ---- the page ---- */
+function renderLibrary() {
+  if (!state.library.open) return;
+  const items = libraryItems();
+  $("#lib-count").textContent = `${items.length} / ${state.followups.length}`;
+  // the layout tabs, in the same segmented control the sidebar uses
+  for (const v of LIB_VIEWS) {
+    const btn = $(`#lib-view-${v}`);
+    btn.classList.toggle("active", state.library.view === v);
+    btn.setAttribute("aria-selected", String(state.library.view === v));
+  }
+  // grouping only exists in one layout, so its select appears with it rather
+  // than sitting in the bar as a control that does nothing
+  let grouping = $("#lib-grouping");
+  if (state.library.view === "grouped") {
+    if (!grouping) {
+      grouping = el(
+        "select",
+        { id: "lib-grouping", title: "Group by", "aria-label": "Group by" },
+        ...LIB_GROUPS.map((g) => el("option", { value: g, text: g === "tag" ? "Group by tag" : g === "repo" ? "Group by workspace" : "Group by month" }))
+      );
+      grouping.addEventListener("change", () => {
+        state.library.grouping = grouping.value;
+        renderLibrary();
+      });
+      $("#lib-views").before(grouping);
+    }
+    grouping.value = state.library.grouping;
+    grouping.classList.remove("hidden");
+  } else if (grouping) {
+    grouping.classList.add("hidden");
+  }
+
+  const facets = $("#lib-facets");
+  facets.replaceChildren(
+    libraryFacet({ id: "lib-facet-tag", label: "Tag", field: "tag" }),
+    libraryFacet({ id: "lib-facet-repo", label: "Workspace", field: "repo" }),
+    libraryTimeFacet()
+  );
+  renderLibraryActive();
+
+  const body = $("#lib-body");
+  // the split layout scrolls its two panes itself; the other two scroll one
+  // column, so the container must not also be a scroll port
+  body.replaceChildren();
+  if (state.library.loading && !items.length) {
+    body.append(el("div", { class: "lib-empty", text: "Searching…" }));
+    return;
+  }
+  body.append(
+    state.library.view === "grid"
+      ? renderLibraryGrid(items)
+      : state.library.view === "split"
+        ? renderLibrarySplit(items)
+        : renderLibraryGrouped(items)
+  );
+}
+
+/** Read the list for the current query. The server does the body matching and
+ *  returns a snippet per hit, because the metadata list carries only an excerpt;
+ *  everything else (facets, sorting) is applied over what comes back. */
+async function loadLibrary() {
+  state.library.loading = true;
+  renderLibrary();
+  try {
+    const q = state.library.q.trim();
+    const data = await api(`/api/followups${q ? `?q=${encodeURIComponent(q)}` : ""}`);
+    state.library.items = Array.isArray(data.followups) ? data.followups : [];
+  } catch (err) {
+    toast(`could not load follow-ups: ${err.message}`, "error");
+    state.library.items = [];
+  } finally {
+    state.library.loading = false;
+    renderLibrary();
+  }
+}
+
+let librarySearchTimer = 0;
+
+function openLibrary() {
+  state.library.open = true;
+  $("#library").classList.remove("hidden");
+  $("#followup-view").classList.add("hidden");
+  $("#transcript-wrap").classList.add("hidden");
+  $("#composer-dock").classList.add("hidden");
+  $("#transcript-empty").classList.add("hidden");
+  renderHeader();
+  // the metadata list may be a boot-time snapshot; a page of every summary is
+  // worth one directory read, and the facet counts are drawn from it
+  loadFollowups().then(() => loadLibrary());
+  $("#lib-q").focus();
+}
+
+function closeLibrary() {
+  if (!state.library.open) return;
+  state.library.open = false;
+  $("#library").classList.add("hidden");
+  closeLibraryMenus();
+  $("#transcript-wrap").classList.remove("hidden");
+  $("#composer-dock").classList.remove("hidden");
+  renderHeader();
+  // the empty panel is re-derived from the session, not assumed: this tab's
+  // session may still have no turns
+  updateEmptyState();
+  inputEl.focus();
+}
+
+/** Open one summary from the library. The library stays open underneath, so the
+ *  document's Back returns to the list rather than to the transcript. */
+async function openLibraryFollowup(id) {
+  state.followupFromLibrary = true;
+  await openFollowup(id);
+  if (!state.openFollowup) state.followupFromLibrary = false;
+}
+
+$("#lib-close").addEventListener("click", closeLibrary);
+$("#btn-library").addEventListener("click", () => (state.library.open ? closeLibrary() : openLibrary()));
+$("#lib-q").addEventListener("input", (e) => {
+  clearTimeout(librarySearchTimer);
+  const value = e.target.value;
+  // a keystroke per request would re-read the follow-up directory 20 times for
+  // one word; the pause is long enough to type through, short enough to feel live
+  librarySearchTimer = setTimeout(() => {
+    state.library.q = value.trim();
+    loadLibrary();
+  }, 160);
+});
+for (const v of LIB_VIEWS) {
+  $(`#lib-view-${v}`).addEventListener("click", () => {
+    state.library.view = v;
+    localStorage.setItem(LIB_VIEW_KEY, v);
+    renderLibrary();
+  });
+}
+// a click anywhere else closes an open facet menu; the menus live inside the
+// bar, so this has to be captured document-wide
+document.addEventListener("click", (e) => {
+  const target = /** @type {Element | null} */ (e.target);
+  if (!target?.closest?.("#lib-facets")) closeLibraryMenus();
+});
 
 async function loadSessions() {
   try {
@@ -6543,6 +7343,8 @@ async function switchSession(file, cwd) {
   // a session row always wins over a follow-up on screen: leaving the follow-up
   // also restores the transcript and composer this session needs
   if (state.openFollowup) closeFollowup();
+  // same for the library: a session row is a request for the transcript
+  if (state.library.open) closeLibrary();
   if (file === state.sessionFile) return;
   const gen = ++switchGen;
   const prevFile = state.sessionFile;
@@ -8325,6 +9127,9 @@ document.addEventListener("keydown", (e) => {
       // close the document being edited
       if (state.followupEditing) cancelFollowupEdit();
       else closeFollowup();
+    } else if (state.library.open) {
+      if (!document.querySelector("#lib-facets .lib-facet-menu:not(.hidden)")) closeLibrary();
+      else closeLibraryMenus();
     } else if (!$("#ws-overlay").classList.contains("hidden")) {
       closeWsPicker();
     } else if (!$("#dialog-overlay").classList.contains("hidden")) {

@@ -2201,6 +2201,13 @@ button:disabled { opacity: 0.4; cursor: default; transform: none; }
   font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
 }
 
+/* While the first-run panel is up, the session's two metadata chips
+   (model → …, thinking level → …) say nothing the toolbar's pickers do not,
+   and they sit exactly where the panel draws the eye. They are hidden, not
+   removed: the class flips off with the first turn and the chips come back
+   with it, so the record of what changed is never edited. */
+.session-empty #transcript .item-notice { display: none; }
+
 /* Long transcripts skip layout for off-screen items.
  *
  * A 17.7 MB session renders 3,260 items / 63,404 nodes / 550,127 px of scroll
@@ -3922,22 +3929,25 @@ textarea:focus-visible,
    Narrow windows: the sidebar becomes a drawer
 
    The toolbar breakpoints above shed whole read-outs, but the sidebar itself
-   never got one: it is a 280px column with `min-width: 220px`, so at a 390px
-   window it kept its full width and left ~110px for the transcript, which
-   measured 3-4 characters per line. The column cannot shrink, so it has to
-   leave the flow instead.
+   cannot shed width: it is a 280px column with `min-width: 220px`, so it has
+   to leave the flow instead. The threshold is 900px, not a phone size — at an
+   800px window the column plus gutters left ~500px for the transcript, which
+   is where a Markdown table already needs its horizontal scroller and a code
+   block wraps. Below the threshold the panel is off-canvas by default (a
+   fresh window has no saved collapse state) and slides over the conversation
+   when asked for; the transcript owns the full width.
 
    This is CSS only and it does not touch the collapse logic in app.js: the
    drawer is driven by the same `body.sidebar-collapsed` class the collapse
    button already toggles, so the expand button in the toolbar becomes the
-   drawer's opener and the class stays the single source of truth. Below 720px
-   the sidebar is off-canvas by default (a fresh window has no saved collapse
-   state) and slides over the conversation when asked for.
+   drawer's opener and the class stays the single source of truth. app.js
+   mirrors the threshold as NARROW_WINDOW — the smoke test pins the two to
+   the same number, so change both or neither.
 
    The drawer is also the one place a backdrop is warranted: without it a tap
    meant for a dimmed transcript would land on a row behind the panel.
 --------------------------------------------------------------------------- */
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   /* off-canvas by default, unless the reader has explicitly opened it. The
      inline custom property is set by the button below, not by JS. */
   #sidebar {
@@ -3984,8 +3994,10 @@ textarea:focus-visible,
   }
 }
 /* the transcript owns the full width once the sidebar has left the flow */
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   #main { width: 100%; }
+}
+@media (max-width: 720px) {
   /* reading size, not chrome size: at 390px the body dropped to 13.5px on a
      ~366px measure, which is 2-3 words a line */
   #transcript { font-size: 14px; line-height: 1.62; }
@@ -4011,7 +4023,7 @@ textarea:focus-visible,
    layer is not clipped by the pane's radius, so it would draw over the gutter
    and the rounded corner instead of fading out inside it.
 --------------------------------------------------------------------------- */
-@media (min-width: 721px) {
+@media (min-width: 901px) {
   #app { padding: 10px; gap: 10px; }
 
   #resizer { width: 0; background: transparent; }
@@ -4040,3 +4052,347 @@ textarea:focus-visible,
   #main::after { position: absolute; inset: 0; }
 }
 
+
+/* ---------------------------------------------------------------------------
+   Follow-ups library
+
+   The sidebar's Follow-ups tab is a filing cabinet beside a transcript: one
+   narrow column, a tree by tag, and one document at a time in the main column.
+   That is the right shape for opening a summary you already have in mind, and
+   the wrong shape for answering "what have I kept?" — 35 rows in 280px, where
+   a tag has to be read off a chip and the body is never visible.
+
+   This is the page that answers it: the whole corpus at once, with the three
+   ways of looking at it that people actually use (scan cards / read one while
+   keeping the list / read it grouped), one filter bar over all three, and body
+   search. It is a *view of the same records* — nothing here is stored twice,
+   and opening a summary still leaves the library for the document page.
+
+   It takes the transcript's place in the main column, like #followup-view,
+   because that is the only full-width reading surface the app has. The
+   composer and the transcript are hidden while it is up: no agent is attached
+   to a page of saved summaries.
+--------------------------------------------------------------------------- */
+#library {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--page);
+}
+#library-bar {
+  flex: none;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  position: relative; z-index: 6;
+}
+#library-bar::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+  pointer-events: none;
+  background: linear-gradient(to right,
+    transparent, var(--accent-tint-border) 22%, var(--accent) 50%,
+    var(--accent-tint-border) 78%, transparent);
+  opacity: 0.55;
+}
+.lib-title {
+  font-family: var(--font-display); font-weight: 600; font-size: 14px;
+  letter-spacing: -0.3px; white-space: nowrap;
+}
+#lib-count { flex: none; font-variant-numeric: tabular-nums; }
+
+/* the search field is the sidebar filter's own recipe at page width: one
+   control, one place a query goes, no second search box to keep in step */
+.lib-search { position: relative; display: flex; align-items: center; flex: 1 1 320px; max-width: 420px; min-width: 160px; }
+.lib-search svg { position: absolute; left: 12px; color: var(--text-3); pointer-events: none; }
+#lib-q {
+  width: 100%; min-height: 30px;
+  padding: 4px 30px 4px 34px;
+  background: color-mix(in oklab, var(--surface) 84%, transparent);
+  color: var(--text);
+  border: 1px solid var(--glass-edge-soft); border-radius: var(--radius-pill);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-ui); font-size: 12.5px; outline: none;
+  -webkit-appearance: none; appearance: none;
+}
+#lib-q::placeholder { color: var(--text-3); }
+#lib-q:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint), 0 0 26px -8px var(--glow); }
+#lib-q::-webkit-search-cancel-button { filter: invert(0.7); }
+
+/* facets: a button that opens a checkbox menu. Native <select multiple> is
+   unusable on a trackpad and cannot show counts, and three of these side by side
+   are what keep the filter bar one row at any width a laptop has. */
+.lib-facets { display: flex; gap: 6px; flex: none; }
+.lib-facet { position: relative; }
+.lib-facet-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  min-height: 28px; padding: 2px 11px;
+  background: transparent; border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: 12px; color: var(--text-2); white-space: nowrap;
+}
+.lib-facet-btn:hover { background: var(--elevated); color: var(--text); }
+.lib-facet.on .lib-facet-btn { background: var(--accent-tint); border-color: var(--accent-tint-border); color: var(--text); }
+.lib-facet-btn .caret { font-size: 8px; opacity: 0.65; }
+.lib-facet-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 45;
+  min-width: 220px; max-height: min(60vh, 380px); overflow-y: auto; overscroll-behavior: contain;
+  padding: 6px;
+  background: var(--glass-fill);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border: 1px solid var(--glass-edge); border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-top), 0 0 40px -14px var(--glow);
+}
+.lib-facet-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: var(--radius-xs);
+  font-size: 12.5px; color: var(--text-2); cursor: pointer;
+}
+.lib-facet-item:hover { background: var(--elevated); color: var(--text); }
+.lib-facet-item .box {
+  flex: none; width: 13px; height: 13px; border-radius: 4px;
+  border: 1px solid var(--border-strong);
+}
+.lib-facet-item[aria-checked="true"] .box {
+  background: var(--accent); border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--surface);
+}
+.lib-facet-item .n { margin-left: auto; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.lib-facet-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+
+/* layout tabs: the same segmented control as the sidebar's view tabs, because
+   the three layouts are the same kind of choice as recent/workspaces/followups */
+.lib-views {
+  flex: none; display: flex; gap: 1px; padding: 3px;
+  background: color-mix(in oklab, var(--page) 72%, transparent);
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.22);
+}
+.lib-views button {
+  min-height: 22px; padding: 2px 11px;
+  background: transparent; border-color: transparent; color: var(--text-2);
+  font-size: 11.5px; font-weight: 500; border-radius: var(--radius-xs);
+  white-space: nowrap;
+}
+.lib-views button:hover { background: transparent; color: var(--text); }
+.lib-views button.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow-sm); }
+
+/* active filters, as removable chips: a filter that cannot be seen is a filter
+   the reader blames the page for */
+.lib-active {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 0 16px;
+}
+.lib-active:not(:empty) { padding: 8px 16px; border-bottom: 1px solid var(--border); }
+.lib-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 4px 2px 9px; border-radius: var(--radius-pill);
+  background: var(--accent-tint); border: 1px solid var(--accent-tint-border);
+  font-size: 11.5px; color: var(--text);
+}
+.lib-chip button {
+  width: 15px; height: 15px; min-height: 15px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border-color: transparent;
+  color: inherit; font-size: 9px; line-height: 1; opacity: 0.72;
+}
+.lib-chip button:hover { background: transparent; border-color: transparent; opacity: 1; color: var(--danger); }
+.lib-clear { background: none; border: 0; padding: 2px 4px; font-size: 11.5px; color: var(--text-3); }
+.lib-clear:hover { background: none; border: 0; color: var(--accent-text); text-decoration: underline; transform: none; }
+
+.lib-body { flex: 1; min-height: 0; overflow: hidden; display: flex; }
+.lib-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* ---- layout 1: cards ---- */
+/* Every card owns the same three slots — a two-line title, a fixed-height lead
+   (a four-line excerpt, or the three-line search snippet in its tinted box) and
+   one row of tags — with the footer pinned to the bottom. Without fixed slots the
+   wall's row height came from whichever summary happened to be longest, so the
+   cards sat at four different heights and the grid read as ragged. */
+.lib-grid {
+  display: grid; gap: 10px; padding: 14px 16px 28px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-items: stretch;
+}
+.lib-card {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 13px 14px 11px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg,
+    color-mix(in oklab, var(--surface) 96%, var(--accent) 4%), var(--surface));
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), transform 0.18s var(--ease-out);
+}
+.lib-card:hover {
+  border-color: var(--accent-tint-border);
+  box-shadow: 0 10px 30px -16px var(--glow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  transform: translateY(-1px);
+}
+.lib-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 12px 34px -18px var(--glow); }
+.lib-card h3 {
+  margin: 0; font-family: var(--font-display); font-size: 13.5px; font-weight: 600;
+  line-height: 1.4; letter-spacing: -0.1px;
+  /* exactly two lines, not up to two: a one-line title must not shorten the card
+     by a line-height, or a row of cards looks like it lost a card's worth of ink */
+  height: calc(1.4em * 2);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  overflow-wrap: anywhere;
+}
+/* the lead is a slot, not a paragraph: 4 excerpt lines and the snippet's 3 lines
+   plus its padding and border add up to the same box, so a search hit and a
+   plain card are the same height */
+.lib-card .lib-lead {
+  flex: none;
+  /* 12px is the excerpt's own size, so the em maths below is the same unit the
+     text is set in */
+  font-size: 12px;
+  height: calc(1.55em * 4);
+  overflow: hidden;
+}
+.lib-card .lib-excerpt {
+  margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-2);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.lib-card .lib-snippet {
+  font-size: 11.5px; line-height: 1.5; color: var(--text-2);
+  padding: 6px 8px; border-radius: var(--radius-xs);
+  background: color-mix(in oklab, var(--accent-tint) 42%, transparent);
+  border-left: 2px solid var(--accent);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.lib-card .lib-tags {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  /* one row of chips: a summary with six tags used to wrap to three lines and be
+     the tallest card on the page. The +N chip already says there are more. */
+  height: 1.6em; overflow: hidden;
+}
+/* One line, always. The footer is three pieces of metadata beside a workspace
+   chip, and only the chip can be long — but `Nov 24, 02:30` has a space in it,
+   so a crowded row wrapped the date onto a second line and three cards in the
+   wall stood 16px taller than their neighbours. Nothing here wraps now; the
+   repository truncates and the rest is pinned. */
+.lib-card footer {
+  display: flex; align-items: center; flex-wrap: nowrap; gap: 7px;
+  margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border);
+  font-size: 11px; line-height: 1.45; color: var(--text-3); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lib-card footer > span { flex: none; }
+.lib-card footer .repo {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lib-card footer .right { margin-left: auto; flex: none; }
+mark.lib-hit { background: color-mix(in oklab, var(--accent) 38%, transparent); color: var(--text); border-radius: 3px; padding: 0 1px; }
+/* an untagged summary keeps a dashed chip: absence is information here, and a
+   blank space would read as a render bug */
+.s-tag.lib-untagged { background: transparent; color: var(--text-3); border-style: dashed; border-color: var(--border); }
+
+/* ---- layout 2: list + preview ---- */
+/* A flex row, not a grid: the list's width is dragged, so it is a length rather
+   than a fraction, and a grid track would have to be re-described every time.
+   The default 44% is the 0.9fr/1.1fr split this layout shipped with. */
+.lib-split { display: flex; flex: 1; min-width: 0; height: 100%; min-height: 0; }
+.lib-rows { flex: none; width: 44%; min-width: 0; overflow-y: auto; }
+/* A saved width that no longer fits (a narrower window after a drag) must not
+   push the preview off the page: the floor for the reading column is the same
+   one the drag uses, so the two ways of setting the width agree. */
+@media (min-width: 901px) {
+  .lib-rows { max-width: calc(100% - 420px); }
+}
+/* the divider is the sidebar #resizer's recipe at page scale: a 1px hairline
+   whose hit area is widened without painting anything extra */
+.lib-divider {
+  flex: none; width: 1px; align-self: stretch;
+  background: var(--border);
+  cursor: col-resize; position: relative; z-index: 4;
+  touch-action: none;
+}
+.lib-divider::before { content: ""; position: absolute; top: 0; bottom: 0; left: -4px; right: -3px; }
+.lib-divider:hover, .lib-divider.dragging { background: var(--border-strong); }
+.lib-row {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 9px 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+  cursor: pointer;
+}
+.lib-row:hover { background: color-mix(in oklab, var(--elevated) 60%, transparent); }
+.lib-row.active { background: var(--accent-tint); box-shadow: inset 2px 0 0 var(--accent); }
+.lib-row .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.lib-row .row-title {
+  font-size: 12.5px; font-weight: 500; line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lib-row .row-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 11px; color: var(--text-3); }
+.lib-row .row-when { flex: none; padding-top: 1px; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* the pane scrolls, and the record inside it is a block: the body has to be
+   able to grow past the fold without stretching its parent's grid track */
+.lib-preview { flex: 1 1 0; min-width: 0; overflow-y: auto; padding: 18px 22px 36px; background: color-mix(in oklab, var(--page) 92%, var(--surface)); }
+.lib-pv .lib-pv-head { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.lib-pv .lib-pv-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; line-height: 1.35; letter-spacing: -0.2px; }
+.lib-pv .lib-pv-meta {
+  display: flex; flex-wrap: wrap; gap: 9px; margin-top: 6px;
+  font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.lib-pv .lib-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.lib-pv .lib-pv-body { font-size: 13px; line-height: 1.6; }
+.lib-pv .lib-pv-open { margin-top: 16px; }
+.lib-empty { padding: 56px 18px; text-align: center; color: var(--text-3); font-size: 12.5px; }
+.lib-empty .lib-empty-tip { margin-top: 7px; font-size: 11.5px; opacity: 0.82; }
+
+/* ---- layout 3: grouped cards ---- */
+.lib-group { padding: 0 16px; }
+.lib-group-head {
+  position: sticky; top: 0; z-index: 3;
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 12px 0 8px;
+  background: linear-gradient(180deg, var(--page) 62%, transparent);
+  border: 0; border-radius: 0; box-shadow: none;
+  font-family: var(--font-ui); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-2);
+  text-align: left;
+}
+.lib-group-head:hover { background: linear-gradient(180deg, var(--page) 62%, transparent); transform: none; box-shadow: none; color: var(--text); }
+.lib-group-head .caret { font-size: 9px; color: var(--text-3); transition: transform 0.16s var(--ease-out); }
+.lib-group-head.open .caret { transform: rotate(90deg); }
+.lib-group-head .g-count {
+  font-size: 10.5px; padding: 0 7px; border-radius: var(--radius-pill);
+  background: var(--elevated); border: 1px solid var(--border);
+  color: var(--text-3); text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums;
+}
+.lib-group .lib-grid { padding: 0 0 16px; }
+#lib-grouping {
+  flex: none; min-height: 28px; padding: 2px 9px;
+  background: color-mix(in oklab, var(--elevated) 82%, transparent);
+  color: var(--text-2); border: 1px solid var(--border); border-radius: var(--radius-pill);
+  font-family: var(--font-ui); font-size: 11.5px; outline: none;
+}
+#lib-grouping:focus { border-color: var(--accent); }
+
+@media (max-width: 1180px) {
+  /* the facet labels shorten rather than wrap: three of them plus a search
+     field and the layout tabs are already the width of a laptop */
+  .lib-facet-btn .facet-word { display: none; }
+  .lib-facet-btn { padding: 2px 9px; }
+}
+@media (max-width: 900px) {
+  /* below the drawer threshold the library is the whole page: the split layout
+     becomes list-then-document, which is what its own Back control is for */
+  .lib-split { flex-direction: column; }
+  .lib-rows { flex: 1 1 auto; width: auto; min-height: 0; }
+  .lib-divider { display: none; }
+  .lib-preview { display: none; }
+  .lib-split.previewing .lib-rows { display: none; }
+  .lib-split.previewing .lib-preview { display: block; }
+  .lib-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  #library-bar { flex-wrap: wrap; }
+  .lib-search { flex-basis: 100%; max-width: none; order: 3; }
+}

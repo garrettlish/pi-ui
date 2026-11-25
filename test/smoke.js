@@ -1141,6 +1141,24 @@ try {
   check("style.css skips layout for off-screen items", css.includes("content-visibility: auto"));
   check("style.css gives a skipped item a sizeable box", css.includes("contain-intrinsic-size: auto 190px"));
 
+  // The drawer threshold is one number living in two files: app.js reads it to
+  // decide whether "not collapsed" still means "on screen", style.css to turn
+  // the sidebar into the off-canvas panel. A drift between them strands the
+  // panel (JS thinks column, CSS thinks sheet) or the expand button.
+  const narrowJs = appJs.match(/NARROW_WINDOW = (\d+)/);
+  const narrowCss = css.match(/@media \(max-width: (\d+)px\) \{\s*\n\s*\/\* off-canvas/);
+  check(
+    "the drawer threshold is the same number in app.js and style.css",
+    !!(narrowJs && narrowCss && narrowJs[1] === narrowCss[1])
+  );
+  // An empty session's metadata chips duplicate the toolbar pickers; they are
+  // hidden by a class on the wrap, never removed from the record.
+  check(
+    "the first-run panel hides the duplicate metadata chips",
+    appJs.includes('classList.toggle("session-empty", empty)') &&
+      css.includes(".session-empty #transcript .item-notice")
+  );
+
   // Thinking is folded by default but readers re-open it constantly, and the
   // open state used to live only in the DOM: measured, expanding two blocks and
   // then rebuilding one unrelated item closed one of them, and a full refresh
@@ -1614,6 +1632,85 @@ try {
   check("the filter matches on tags too", appJs.includes("function followupMatches("));
   check("style.css draws the tag tree", css.includes(".fu-group-head {") && css.includes(".s-tag {"));
 
+  // The library page is the second view of the same records: the whole corpus
+  // at once, three layouts behind one tab row, and a search that reaches body
+  // text. The assertions below pin the parts that make it more than a wider
+  // copy of the sidebar tab — without them a refactor could quietly drop the
+  // body search back to titles and nothing would say so.
+  check(
+    "the page carries a follow-ups library view",
+    html.includes('id="library"') && html.includes('id="lib-body"') && html.includes('id="lib-q"')
+  );
+  check(
+    "the library offers three layouts behind one tab row",
+    ["grid", "split", "grouped"].every((v) => html.includes(`id="lib-view-${v}"`))
+  );
+  check(
+    "app.js renders the three library layouts",
+    appJs.includes("function renderLibraryGrid(") &&
+      appJs.includes("function renderLibrarySplit(") &&
+      appJs.includes("function renderLibraryGrouped(")
+  );
+  check(
+    "the library is opened from the toolbar, not only the sidebar",
+    html.includes('id="btn-library"') && appJs.includes('$("#btn-library").addEventListener')
+  );
+  // the facet bar is the reason the sidebar could not do this: tags, workspaces
+  // and a time window, all multi-value, without a second row of chrome
+  check(
+    "the library filters by tag, workspace and time",
+    appJs.includes("function libraryFacet(") && appJs.includes("function libraryTimeFacet(")
+  );
+  check("the library shows what it filtered by", appJs.includes("function renderLibraryActive("));
+  // a facet menu has to survive the re-render a tick causes, or multi-select is
+  // unreachable: the first press would fold the menu it was pressed in
+  check(
+    "an open facet menu survives a filter press",
+    appJs.includes("openMenu: null") && appJs.includes("state.library.openMenu === id")
+  );
+  // the split layout's preview reads a body the list does not carry, and renders
+  // it through the transcript's own Markdown path
+  check(
+    "the split preview renders the stored Markdown",
+    /function libraryPreview\([\s\S]{0,900}renderMarkdown\(f\.text/.test(appJs)
+  );
+  check("the split preview reuses the tag chips", appJs.includes("function libraryTagChips("));
+  // Back goes where the reader came from, which is the whole reason a card opens
+  // the document page instead of expanding in place
+  check(
+    "Back from a library card returns to the library",
+    appJs.includes("followupFromLibrary") && /backToLibrary[\s\S]{0,400}renderLibrary\(\)/.test(appJs)
+  );
+  check("style.css draws the library's three layouts", css.includes(".lib-grid {") && css.includes(".lib-split {") && css.includes(".lib-group-head {"));
+  // A card wall is only even if its footer is. The date is two tokens ("Nov 24,
+  // 02:30"), so a long workspace chip wrapped it onto a second line and three
+  // cards in the wall stood a line taller than their neighbours — the card
+  // slots fixed the heights below the footer and this fixes the footer itself.
+  check(
+    "a card's footer never wraps to a second line",
+    /\.lib-card footer \{[^}]*white-space: nowrap/.test(css) &&
+      /\.lib-card footer \.repo \{[^}]*text-overflow: ellipsis/.test(css),
+    "the repo chip truncates; the date and the size are pinned"
+  );
+  // The split layout's divider is the sidebar resizer's affordance applied to a
+  // pane that is rebuilt on every render: the width therefore has to be restored
+  // from storage by the renderer, and the two floors have to be enforced on the
+  // drag — a list dragged to the edge would leave the preview a 60px sliver.
+  check(
+    "the split layout has its own drag handle",
+    appJs.includes("function librarySplitDivider(") && appJs.includes('class: "lib-divider"') && css.includes(".lib-divider {")
+  );
+  check(
+    "a dragged split width is persisted and re-applied",
+    appJs.includes("LIB_SPLIT_WIDTH_KEY") &&
+      /localStorage\.setItem\(LIB_SPLIT_WIDTH_KEY/.test(appJs) &&
+      /savedW > 0[\s\S]{0,120}rows\.style\.width/.test(appJs)
+  );
+  check(
+    "the split drag keeps both panes usable",
+    /LIB_SPLIT_MIN_ROWS[\s\S]{0,200}LIB_SPLIT_MIN_PREVIEW/.test(appJs) && css.includes("max-width: calc(100% - 420px)")
+  );
+
   // The extension dialog used to be one slot: two sessions asking at once meant
   // the second record overwrote the first on screen, and the displaced question
   // had no button anywhere — its session blocked with nothing to see. It is a
@@ -1799,6 +1896,27 @@ try {
     "/api/followups lists metadata without the body",
     listed.followups[0]?.text === undefined,
     JSON.stringify(listed.followups[0]).slice(0, 200)
+  );
+  // The library page needs something to show before a card is opened, and it
+  // searches bodies without downloading them: an excerpt plus a server-side
+  // body match is what keeps the list one request per keystroke instead of one
+  // read per follow-up.
+  check(
+    "/api/followups lists an excerpt for the library cards",
+    typeof listed.followups[0]?.excerpt === "string" && listed.followups[0].excerpt.length > 0,
+    JSON.stringify(listed.followups[0]).slice(0, 200)
+  );
+  check(
+    "/api/followups?q= matches body text the list does not carry",
+    (await (await fetch(`${BASE}/api/followups?q=${encodeURIComponent("module is unused")}`)).json()).followups.length === 1
+  );
+  check(
+    "/api/followups?q= answers with a snippet around the match",
+    typeof (await (await fetch(`${BASE}/api/followups?q=${encodeURIComponent("unused")}`)).json()).followups[0]?.snippet === "string"
+  );
+  check(
+    "/api/followups?q= excludes a summary whose body does not contain the query",
+    (await (await fetch(`${BASE}/api/followups?q=${encodeURIComponent("nonesuchword")}`)).json()).followups.length === 0
   );
   const opened = await (await fetch(`${BASE}/api/followups/${followupId}`)).json();
   check(
